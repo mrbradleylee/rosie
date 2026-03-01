@@ -1,37 +1,80 @@
-# dotenvy
+# Rosie
 
-dotenvy is a maintained fork of the `dotenv` crate that provides the same API but is actively maintained
-and has a small bug‑free history. It supports standard `.env` loading and can be used with the `"toml"`
-feature to automatically parse `.env` files that contain TOML syntax.
+Rosie is a small CLI written in Rust that takes a natural‑language description of a task, sends it to an OpenAI LLM, and returns the exact shell command that accomplishes the task. It can read the prompt from the `--prompt` flag or from standard input, making it useful as a wrapper for `ssh`, `make`, or as a helper in scripts.
 
-## `Cargo.toml`
+## Features
 
-```toml
-[dependencies]
-dotenvy = { version = "0.15", features = ["toml"] }
+- 🎯 Turns plain‑text prompts into shell commands using the OpenAI API
+- 💡 Supports custom models via `OPENAI_MODEL`
+- 🔐 Securely loads the OpenAI API key from a `.env` file, environment variable, or `OPENAI_API_KEY`
+- 📦 Built in Rust, fast, and has zero runtime dependencies other than standard crates
+- 📦 Cross‑platform (Linux/macOS/Windows with Rust toolchain)
+
+## Installation
+
+Rosie is a single binary crate.
+Install Rust from https://rustup.rs if you don't already have it.
+
+```bash
+# clone the repo
+git clone https://github.com/your-username/rosie
+cd rosie
+
+# build (release for smaller binary)
+cargo build --release
+```
+
+The binary will be in `target/release/rosie`. Add that directory to your `PATH` or call it directly:
+
+```bash
+./target/release/rosie -p "Create a virtualenv"
 ```
 
 ## Usage
 
-```rust
-use dotenvy::dotenv;
+```bash
+# Prompt from stdin
+echo "Add a new file to the repository" | ./target/release/rosie
 
-fn main() {
-    dotenv().ok(); // Load environment variables from `.env`
-    let api_key = std::env::var("OPENAI_API_KEY").expect("Missing API key");
-    // ...
-}
+# Prompt from the --prompt flag
+./target/release/rosie -p "Show me the top 10 processes by memory usage"
+
+# Use environment variable
+OPENAI_API_KEY="sk-..." OPENAI_MODEL="gpt-4o-mini" ./target/release/rosie -p "..."
+
+# Logging
+RUST_LOG=info ./target/release/rosie -p "..."
 ```
 
-## Why switch?
+The program will **print** the generated command. Pipe it to `bash -c` if you want to execute it:
 
-* **Security** – the original `dotenv` crate is unmaintained and had a couple of past issues that
-  could lead to memory safety bugs.
-* **Modern Rust** – `dotenvy` keeps up with Rust's ecosystem, ensuring no de‑pricated dependencies.
-* **Feature parity** – the API and behaviour are identical to `dotenv`, so the overall codebase is
-  unchanged apart from the single `use` statement and updated dependency.
+```bash
+echo "List all Git branches" | ./target/release/rosie | bash -c
+```
 
-## Migrating
+## Configuration
 
-Add `dotenvy` to `Cargo.toml` as shown above, replace `use dotenv::dotenv;` with
-`use dotenvy::dotenv;`, and then run `cargo check`. No other code changes are required.
+Rosie expects certain environment variables:
+
+| Variable | Purpose | Required |
+|----------|---------|----------|
+| `OPENAI_API_KEY` | OpenAI API key | ✅ |
+| `OPENAI_ENDPOINT` | Custom OpenAI compatible endpoint (e.g. Anthropic, OpenRouter) | ❌ (defaults to `https://api.openai.com`) |
+| `OPENAI_MODEL` | The model name used for chat completions | ❌ (defaults to `gpt-4o-mini`) |
+
+Create a `.env` file in the project root or current working directory:
+
+```dotenv
+# .env
+OPENAI_API_KEY="sk-..."
+```
+
+Rosie uses `dotenvy` to load this file automatically.
+
+## License
+
+This project is licensed under the MIT license – see the [LICENSE](LICENSE) file for details.
+
+## Contributing
+
+Pull requests are welcome! Please check the issues tracker and open an issue before starting.
