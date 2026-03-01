@@ -8,4 +8,5 @@ Cargo.lock
 *.log
 
 # env
-*.env
+*.env*
+.env
