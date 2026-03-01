@@ -1,6 +1,6 @@
 // src/main.rs
 use anyhow::{anyhow, Result};
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use log::info;
 use std::env;
 use tokio::io::{self, AsyncReadExt};
