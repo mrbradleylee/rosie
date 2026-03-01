@@ -1,6 +1,10 @@
 # Rosie
 
-Rosie is a small CLI written in Rust that takes a natural‑language description of a task, sends it to an OpenAI LLM, and returns the exact shell command that accomplishes the task. It can read the prompt from the `--prompt` flag or from standard input, making it useful as a wrapper for `ssh`, `make`, or as a helper in scripts.
+Rosie is a small CLI written in Rust that takes a natural‑language description
+of a task, sends it to an OpenAI LLM, and returns the exact shell command that
+accomplishes the task. It can read the prompt from the `--prompt` flag or from
+standard input, making it useful as a wrapper for `ssh`, `make`, or as a helper
+in scripts.
 
 ## Features
 
@@ -13,7 +17,6 @@ Rosie is a small CLI written in Rust that takes a natural‑language description
 ## Installation
 
 Rosie is a single binary crate.
-Install Rust from https://rustup.rs if you don't already have it.
 
 ```bash
 # clone the repo
@@ -24,7 +27,8 @@ cd rosie
 cargo build --release
 ```
 
-The binary will be in `target/release/rosie`. Add that directory to your `PATH` or call it directly:
+The binary will be in `target/release/rosie`. Add that directory to your `PATH`
+or call it directly:
 
 ```bash
 ./target/release/rosie -p "Create a virtualenv"
@@ -46,7 +50,8 @@ OPENAI_API_KEY="sk-..." OPENAI_MODEL="gpt-4o-mini" ./target/release/rosie -p "..
 RUST_LOG=info ./target/release/rosie -p "..."
 ```
 
-The program will **print** the generated command. Pipe it to `bash -c` if you want to execute it:
+The program will **print** the generated command. Pipe it to `bash -c` if you
+want to execute it:
 
 ```bash
 echo "List all Git branches" | ./target/release/rosie | bash -c
@@ -73,8 +78,10 @@ Rosie uses `dotenvy` to load this file automatically.
 
 ## License
 
-This project is licensed under the MIT license – see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT license – see the [LICENSE](LICENSE)
+file for details.
 
 ## Contributing
 
-Pull requests are welcome! Please check the issues tracker and open an issue before starting.
+Pull requests are welcome! Please check the issues tracker and open an issue
+before starting.
