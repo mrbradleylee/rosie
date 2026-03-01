@@ -10,17 +10,31 @@ async fn main() -> Result<()> {
     dotenv().ok();
     env_logger::init();
 
-    let mut buffer = String::new();
-    io::stdin()
-        .read_to_string(&mut buffer)
-        .await
-        .map_err(|e| anyhow!("stdin error: {}", e))?;
-    let prompt = buffer.trim();
+    // Parse optional prompt flag
+    use clap::Parser;
+    #[derive(Parser, Debug)]
+    struct Args {
+        /// Prompt to send to the LLM (overrides stdin if provided)
+        #[arg(short, long, value_name = "PROMPT")]
+        prompt: Option<String>,
+    }
+    let args = Args::parse();
+    let prompt = match args.prompt {
+        Some(p) => p,
+        None => {
+            let mut buffer = String::new();
+            io::stdin()
+                .read_to_string(&mut buffer)
+                .await
+                .map_err(|e| anyhow!("stdin error: {}", e))?;
+            buffer.trim().to_string()
+        }
+    };
     if prompt.is_empty() {
         return Err(anyhow!("Prompt cannot be empty"));
     }
 
-    let cmd = llm_generate_command(prompt).await?;
+    let cmd = llm_generate_command(&prompt).await?;
     println!("{}", cmd);
     Ok(())
 }
