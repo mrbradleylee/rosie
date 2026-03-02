@@ -3,6 +3,9 @@ use anyhow::{anyhow, Result};
 use dotenvy::dotenv;
 use log::info;
 use std::env;
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::io::{self, AsyncReadExt};
 
 #[tokio::main]
@@ -10,31 +13,53 @@ async fn main() -> Result<()> {
     dotenv().ok();
     env_logger::init();
 
-    // Parse optional prompt flag
     use clap::Parser;
     #[derive(Parser, Debug)]
     struct Args {
-        /// Prompt to send to the LLM (overrides stdin if provided)
-        #[arg(short, long, value_name = "PROMPT")]
-        prompt: Option<String>,
+        /// Prompt to send to the LLM
+        #[arg(trailing_var_arg = true)]
+        prompt: Vec<String>,
     }
     let args = Args::parse();
-    let prompt = match args.prompt {
-        Some(p) => p,
-        None => {
-            let mut buffer = String::new();
-            io::stdin()
-                .read_to_string(&mut buffer)
-                .await
-                .map_err(|e| anyhow!("stdin error: {}", e))?;
-            buffer.trim().to_string()
-        }
+    let prompt = if args.prompt.is_empty() {
+        let mut buffer = String::new();
+        io::stdin()
+            .read_to_string(&mut buffer)
+            .await
+            .map_err(|e| anyhow!("stdin error: {}", e))?;
+        buffer.trim().to_string()
+    } else {
+        args.prompt.join(" ")
     };
     if prompt.is_empty() {
         return Err(anyhow!("Prompt cannot be empty"));
     }
 
-    let cmd = llm_generate_command(&prompt).await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+    let spinner = tokio::task::spawn_blocking(move || {
+        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let mut i = 0usize;
+        let stderr = std::io::stderr();
+        while !stop_clone.load(Ordering::Relaxed) {
+            {
+                let mut err = stderr.lock();
+                let _ = write!(err, "\r{} Thinking...", frames[i % frames.len()]);
+                let _ = err.flush();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            i += 1;
+        }
+        let mut err = stderr.lock();
+        let _ = write!(err, "\r\x1b[2K");
+        let _ = err.flush();
+    });
+
+    let result = llm_generate_command(&prompt).await;
+    stop.store(true, Ordering::Relaxed);
+    let _ = spinner.await;
+
+    let cmd = result?;
     println!("{}", cmd);
     Ok(())
 }

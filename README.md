@@ -2,7 +2,7 @@
 
 Rosie is a small CLI written in Rust that takes a natural‑language description
 of a task, sends it to an OpenAI LLM, and returns the exact shell command that
-accomplishes the task. It can read the prompt from the `--prompt` flag or from
+accomplishes the task. It can read the prompt as trailing arguments or from
 standard input, making it useful as a wrapper for `ssh`, `make`, or as a helper
 in scripts.
 
@@ -31,30 +31,30 @@ The binary will be in `target/release/rosie`. Add that directory to your `PATH`
 or call it directly:
 
 ```bash
-./target/release/rosie -p "Create a virtualenv"
+./target/release/rosie create a virtualenv
 ```
 
 ## Usage
 
 ```bash
-# Prompt from stdin
-echo "Add a new file to the repository" | ./target/release/rosie
+# Prompt as trailing arguments
+rosie show me the top 10 processes by memory usage
 
-# Prompt from the --prompt flag
-./target/release/rosie -p "Show me the top 10 processes by memory usage"
+# Prompt from stdin
+echo "Add a new file to the repository" | rosie
 
 # Use environment variable
-OPENAI_API_KEY="sk-..." OPENAI_MODEL="gpt-4o-mini" ./target/release/rosie -p "..."
+OPENAI_API_KEY="sk-..." OPENAI_MODEL="gpt-4o-mini" rosie list open ports
 
 # Logging
-RUST_LOG=info ./target/release/rosie -p "..."
+RUST_LOG=info rosie list open ports
 ```
 
-The program will **print** the generated command. Pipe it to `bash -c` if you
+The program will **print** the generated command. Pipe it to `bash` if you
 want to execute it:
 
 ```bash
-echo "List all Git branches" | ./target/release/rosie | bash -c
+rosie list all git branches | bash
 ```
 
 ## Configuration
