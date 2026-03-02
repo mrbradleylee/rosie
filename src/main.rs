@@ -1,29 +1,47 @@
 // src/main.rs
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use dotenvy::dotenv;
 use log::info;
+use serde::{Deserialize, Serialize};
 use std::env;
+use std::ffi::OsStr;
+use std::fs;
+use std::io;
+use std::io::BufRead;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{self, AsyncReadExt};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{self as tokio_io, AsyncReadExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
     env_logger::init();
 
+    let raw_args = rewrite_configure_flag(env::args_os());
+
     use clap::Parser;
     #[derive(Parser, Debug)]
     struct Args {
+        /// Configure stored API settings
+        #[arg(long)]
+        configure: bool,
+
         /// Prompt to send to the LLM
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
     }
-    let args = Args::parse();
+    let args = Args::parse_from(raw_args);
+
+    if args.configure {
+        configure()?;
+        return Ok(());
+    }
+
     let prompt = if args.prompt.is_empty() {
         let mut buffer = String::new();
-        io::stdin()
+        tokio_io::stdin()
             .read_to_string(&mut buffer)
             .await
             .map_err(|e| anyhow!("stdin error: {}", e))?;
@@ -64,13 +82,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct Message {
     role: String,
     content: String,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct ChatCompletionRequest {
     model: String,
     messages: Vec<Message>,
@@ -79,27 +97,39 @@ struct ChatCompletionRequest {
 async fn llm_generate_command(prompt: &str) -> Result<String> {
     use reqwest::Client;
 
+    let config = load_config()?;
     let key = env::var("OPENAI_API_KEY")
-        .map_err(|_| anyhow!("OPENAI_API_KEY missing"))?;
+        .ok()
+        .or(config.api_key)
+        .ok_or_else(|| {
+            anyhow!(
+                "OPENAI_API_KEY missing; run `rosie -configure` or set the environment variable"
+            )
+        })?;
 
-    let url = env::var("OPENAI_ENDPOINT")
-        .unwrap_or_else(|_| "https://api.openai.com".to_string())
-        + "/v1/chat/completions";
+    let endpoint = env::var("OPENAI_ENDPOINT")
+        .ok()
+        .or(config.endpoint)
+        .unwrap_or_else(|| "https://api.openai.com".to_string());
+
+    let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
 
     let client = Client::new();
-    let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
-        let prompt_message = format!(
+    let model = env::var("OPENAI_MODEL")
+        .ok()
+        .or(config.model)
+        .unwrap_or_else(|| "gpt-4o-mini".into());
+    let prompt_message = format!(
         "You are an assistant that outputs the exact shell command for the following task, nothing else:\n\n{}",
         prompt
     );
-        let request_body = ChatCompletionRequest {
-            model,
-            messages: vec![Message {
-                role: "user".into(),
-                content: prompt_message,
-            }],
-        };
-
+    let request_body = ChatCompletionRequest {
+        model,
+        messages: vec![Message {
+            role: "user".into(),
+            content: prompt_message,
+        }],
+    };
 
     let resp = client
         .post(&url)
@@ -110,7 +140,11 @@ async fn llm_generate_command(prompt: &str) -> Result<String> {
         .map_err(|e| anyhow!("HTTP send error: {}", e))?;
 
     if !resp.status().is_success() {
-        return Err(anyhow!("API returned {}: {}", resp.status(), resp.text().await?));
+        return Err(anyhow!(
+            "API returned {}: {}",
+            resp.status(),
+            resp.text().await?
+        ));
     }
 
     #[derive(serde::Deserialize)]
@@ -137,12 +171,7 @@ async fn llm_generate_command(prompt: &str) -> Result<String> {
         .trim()
         .to_string();
 
-    let first_line = content
-        .lines()
-        .next()
-        .ok_or_else(|| anyhow!("No content returned"))?
-        .trim()
-        .to_string();
+    let first_line = extract_command(&content)?;
 
     if first_line.is_empty() {
         return Err(anyhow!("Empty command received"));
@@ -150,4 +179,142 @@ async fn llm_generate_command(prompt: &str) -> Result<String> {
 
     info!("Command extracted: {}", first_line);
     Ok(first_line)
+}
+
+fn extract_command(content: &str) -> Result<String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("No content returned"));
+    }
+
+    let mut lines = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let first = lines.next().ok_or_else(|| anyhow!("No content returned"))?;
+
+    if first.starts_with("```") {
+        for line in lines {
+            if line.starts_with("```") {
+                break;
+            }
+            return Ok(line.to_string());
+        }
+        return Err(anyhow!("Empty command received"));
+    }
+
+    Ok(first.to_string())
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct StoredConfig {
+    api_key: Option<String>,
+    endpoint: Option<String>,
+    model: Option<String>,
+}
+
+fn rewrite_configure_flag<I>(args: I) -> Vec<std::ffi::OsString>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    args.into_iter()
+        .map(|arg| {
+            if arg == OsStr::new("-configure") {
+                "--configure".into()
+            } else {
+                arg
+            }
+        })
+        .collect()
+}
+
+fn configure() -> Result<()> {
+    let path = config_path()?;
+    let existing = load_config()?;
+
+    println!("Rosie configuration");
+    println!("Press enter to keep the current value.");
+
+    let api_key = prompt_config_value("API key", existing.api_key.as_deref(), false)?;
+    let endpoint = prompt_config_value(
+        "Endpoint",
+        existing
+            .endpoint
+            .as_deref()
+            .or(Some("https://api.openai.com")),
+        true,
+    )?;
+    let model = prompt_config_value(
+        "Model",
+        existing.model.as_deref().or(Some("gpt-4o-mini")),
+        true,
+    )?;
+
+    let config = StoredConfig {
+        api_key: normalize_config_value(api_key),
+        endpoint: normalize_config_value(endpoint),
+        model: normalize_config_value(model),
+    };
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let serialized = toml::to_string_pretty(&config)?;
+    fs::write(&path, serialized)?;
+
+    println!("Saved configuration to {}", path.display());
+    Ok(())
+}
+
+fn prompt_config_value(label: &str, current: Option<&str>, allow_empty: bool) -> Result<String> {
+    let mut stdout = io::stdout().lock();
+    match current {
+        Some(value) if !value.is_empty() => write!(stdout, "{} [{}]: ", label, value)?,
+        _ => write!(stdout, "{}: ", label)?,
+    }
+    stdout.flush()?;
+
+    let stdin = io::stdin();
+    let mut input = String::new();
+    stdin.lock().read_line(&mut input)?;
+    let input = input.trim().to_string();
+
+    if input.is_empty() {
+        if let Some(value) = current {
+            return Ok(value.to_string());
+        }
+        if allow_empty {
+            return Ok(String::new());
+        }
+        return Err(anyhow!("{} is required", label));
+    }
+
+    Ok(input)
+}
+
+fn normalize_config_value(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn load_config() -> Result<StoredConfig> {
+    let path = config_path()?;
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(toml::from_str(&contents)?),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(StoredConfig::default()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn config_path() -> Result<PathBuf> {
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .ok_or_else(|| anyhow!("Unable to determine config directory"))?;
+    Ok(base.join("rosie").join("config.toml"))
 }

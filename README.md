@@ -10,7 +10,7 @@ in scripts.
 
 - 🎯 Turns plain‑text prompts into shell commands using the OpenAI API
 - 💡 Supports custom models via `OPENAI_MODEL`
-- 🔐 Securely loads the OpenAI API key from a `.env` file, environment variable, or `OPENAI_API_KEY`
+- 🔐 Supports persistent local configuration plus environment variable overrides
 - 📦 Built in Rust, fast, and has zero runtime dependencies other than standard crates
 - 📦 Cross‑platform (Linux/macOS/Windows with Rust toolchain)
 
@@ -40,10 +40,13 @@ or call it directly:
 # Prompt as trailing arguments
 rosie show me the top 10 processes by memory usage
 
+# Configure persisted settings
+rosie -configure
+
 # Prompt from stdin
 echo "Add a new file to the repository" | rosie
 
-# Use environment variable
+# Environment variables override stored config
 OPENAI_API_KEY="sk-..." OPENAI_MODEL="gpt-4o-mini" rosie list open ports
 
 # Logging
@@ -59,7 +62,19 @@ rosie list all git branches | bash
 
 ## Configuration
 
-Rosie expects certain environment variables:
+Rosie reads configuration in this order:
+
+1. Environment variables
+2. Local config file at `~/.config/rosie/config.toml`
+3. Built-in defaults
+
+You can create or update the local config interactively:
+
+```bash
+rosie -configure
+```
+
+Rosie stores these values:
 
 | Variable | Purpose | Required |
 |----------|---------|----------|
@@ -67,14 +82,16 @@ Rosie expects certain environment variables:
 | `OPENAI_ENDPOINT` | Custom OpenAI compatible endpoint (e.g. Anthropic, OpenRouter) | ❌ (defaults to `https://api.openai.com`) |
 | `OPENAI_MODEL` | The model name used for chat completions | ❌ (defaults to `gpt-4o-mini`) |
 
-Create a `.env` file in the project root or current working directory:
+Example config file:
 
-```dotenv
-# .env
-OPENAI_API_KEY="sk-..."
+```toml
+api_key = "sk-..."
+endpoint = "https://api.openai.com"
+model = "gpt-4o-mini"
 ```
 
-Rosie uses `dotenvy` to load this file automatically.
+`.env` files are still loaded if present, which makes them a convenient
+compatibility layer for local development.
 
 ## License
 
