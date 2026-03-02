@@ -1,9 +1,9 @@
 # Changelog
 
-## [0.2.1] - 2026-03-02
+## [Unreleased]
 
 ### Changed
-- Prompt is now passed as trailing arguments (`rosie <prompt>`) instead of requiring the `-p` flag
+- **Breaking**: removed `-p` / `--prompt` flag; prompt is now passed as trailing arguments (`rosie <prompt>`)
 - Added braille spinner animation on stderr while waiting for LLM response
 
 ## [0.2.0]
