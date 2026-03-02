@@ -11,6 +11,7 @@ in scripts.
 - 🎯 Turns plain‑text prompts into shell commands using the OpenAI API
 - 💡 Supports custom models via `OPENAI_MODEL`
 - 🔐 Supports persistent local configuration plus environment variable overrides
+- 📥 Can install itself into a local bin directory with `rosie -install`
 - 📦 Built in Rust, fast, and has zero runtime dependencies other than standard crates
 - 📦 Cross‑platform (Linux/macOS/Windows with Rust toolchain)
 
@@ -18,21 +19,43 @@ in scripts.
 
 Rosie is a single binary crate.
 
+Quick install from the repo page:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mrbradleylee/rosie/main/install.sh | sh
+```
+
+That script clones the repo, builds a release binary with Cargo, and installs
+it into your local bin directory. It requires `git` and `cargo` to already be
+available on your machine.
+
 ```bash
 # clone the repo
-git clone https://github.com/your-username/rosie
+git clone https://github.com/mrbradleylee/rosie
 cd rosie
 
 # build (release for smaller binary)
 cargo build --release
+
+# install into ~/.local/bin/rosie
+./target/release/rosie -install
 ```
 
-The binary will be in `target/release/rosie`. Add that directory to your `PATH`
-or call it directly:
+By default Rosie installs itself into `~/.local/bin/rosie` on Unix-like systems,
+or `$XDG_BIN_HOME/rosie` if `XDG_BIN_HOME` is set. It also installs a man page
+to `~/.local/share/man/man1/rosie.1`, or `$XDG_DATA_HOME/man/man1/rosie.1` if
+`XDG_DATA_HOME` is set. If you prefer not to install, the built binary is still
+available in `target/release/rosie`:
 
 ```bash
 ./target/release/rosie create a virtualenv
 ```
+
+If you rebuild Rosie from source, rerun `./target/release/rosie -install` to
+copy the updated binary into your local bin directory. If `~/.local/bin` is not
+on your `PATH`, Rosie will warn after install. This is a common extra step on
+macOS. You may also need to add `~/.local/share/man` to `MANPATH` for
+`man rosie` to work directly.
 
 ## Usage
 
@@ -42,6 +65,9 @@ rosie show me the top 10 processes by memory usage
 
 # Configure persisted settings
 rosie -configure
+
+# Install the current binary into your local bin directory
+rosie -install
 
 # Prompt from stdin
 echo "Add a new file to the repository" | rosie
@@ -68,13 +94,14 @@ Rosie reads configuration in this order:
 2. Local config file at `~/.config/rosie/config.toml`
 3. Built-in defaults
 
-You can create or update the local config interactively:
+The preferred setup flow is interactive configuration:
 
 ```bash
 rosie -configure
 ```
 
-Rosie stores these values:
+That command creates or updates `~/.config/rosie/config.toml`. Rosie stores
+these values:
 
 | Variable | Purpose | Required |
 |----------|---------|----------|
@@ -90,8 +117,8 @@ endpoint = "https://api.openai.com"
 model = "gpt-4o-mini"
 ```
 
-`.env` files are still loaded if present, which makes them a convenient
-compatibility layer for local development.
+`.env` files are still loaded if present, but they are now a compatibility
+layer for local development rather than the primary setup path.
 
 ## License
 

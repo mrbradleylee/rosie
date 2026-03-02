@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{self as tokio_io, AsyncReadExt};
 
+const MAN_PAGE: &str = include_str!("../man/rosie.1");
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
@@ -28,6 +30,10 @@ async fn main() -> Result<()> {
         #[arg(long)]
         configure: bool,
 
+        /// Install the current binary into a local bin directory
+        #[arg(long)]
+        install: bool,
+
         /// Prompt to send to the LLM
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
@@ -36,6 +42,11 @@ async fn main() -> Result<()> {
 
     if args.configure {
         configure()?;
+        return Ok(());
+    }
+
+    if args.install {
+        install()?;
         return Ok(());
     }
 
@@ -221,11 +232,58 @@ where
         .map(|arg| {
             if arg == OsStr::new("-configure") {
                 "--configure".into()
+            } else if arg == OsStr::new("-install") {
+                "--install".into()
             } else {
                 arg
             }
         })
         .collect()
+}
+
+fn install() -> Result<()> {
+    let source = env::current_exe()?;
+    let bin_dir = local_bin_dir()?;
+    fs::create_dir_all(&bin_dir)?;
+
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| anyhow!("Unable to determine executable name"))?;
+    let destination = bin_dir.join(file_name);
+
+    if source == destination {
+        println!("Rosie is already installed at {}", destination.display());
+        return Ok(());
+    }
+
+    fs::copy(&source, &destination)?;
+    set_executable_permissions(&destination)?;
+
+    println!("Installed Rosie to {}", destination.display());
+
+    let man_page_path = install_man_page()?;
+    println!("Installed man page to {}", man_page_path.display());
+
+    if !path_contains(&bin_dir) {
+        println!(
+            "{} is not on your PATH. Add it to run `rosie` directly.",
+            bin_dir.display()
+        );
+    }
+
+    let man_root = man_page_path
+        .ancestors()
+        .nth(2)
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(|| man_page_path.clone());
+    if !manpath_contains(&man_root) {
+        println!(
+            "{} is not on your MANPATH. You may need to add it to use `man rosie` directly.",
+            man_root.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn configure() -> Result<()> {
@@ -317,4 +375,54 @@ fn config_path() -> Result<PathBuf> {
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .ok_or_else(|| anyhow!("Unable to determine config directory"))?;
     Ok(base.join("rosie").join("config.toml"))
+}
+
+fn local_bin_dir() -> Result<PathBuf> {
+    env::var_os("XDG_BIN_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/bin")))
+        .ok_or_else(|| anyhow!("Unable to determine local bin directory"))
+}
+
+fn local_man_dir() -> Result<PathBuf> {
+    env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .map(|path| path.join("man").join("man1"))
+        .ok_or_else(|| anyhow!("Unable to determine local man directory"))
+}
+
+fn install_man_page() -> Result<PathBuf> {
+    let man_dir = local_man_dir()?;
+    fs::create_dir_all(&man_dir)?;
+    let man_page_path = man_dir.join("rosie.1");
+    fs::write(&man_page_path, MAN_PAGE)?;
+    Ok(man_page_path)
+}
+
+fn path_contains(dir: &std::path::Path) -> bool {
+    env::var_os("PATH")
+        .map(|path| env::split_paths(&path).any(|entry| entry == dir))
+        .unwrap_or(false)
+}
+
+fn manpath_contains(dir: &std::path::Path) -> bool {
+    env::var_os("MANPATH")
+        .map(|path| env::split_paths(&path).any(|entry| entry == dir))
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn set_executable_permissions(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable_permissions(_path: &std::path::Path) -> Result<()> {
+    Ok(())
 }
