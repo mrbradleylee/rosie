@@ -1,0 +1,78 @@
+.TH ROSIE 1
+.SH NAME
+rosie \- generate shell commands from natural-language prompts
+.SH SYNOPSIS
+.B rosie
+[\fIOPTIONS\fR] [\fIPROMPT\fR]...
+.SH DESCRIPTION
+.B rosie
+takes a natural-language task description, sends it to an OpenAI-compatible
+chat completion endpoint, and prints the resulting shell command.
+.PP
+Prompts can be passed as trailing arguments or via standard input.
+.SH OPTIONS
+.TP
+.B \-\-configure
+Interactively create or update the local configuration file.
+.TP
+.B \-\-install
+Install the current binary into the local bin directory and install this man
+page into the local man directory when available.
+.TP
+.B \-h, \-\-help
+Print help information.
+.SH CONFIGURATION
+Rosie reads configuration in this order:
+.IP "1." 4
+Environment variables
+.IP "2." 4
+Local config file at
+.I ~/.config/rosie/config.toml
+.IP "3." 4
+Built-in defaults
+.PP
+Recognized environment variables:
+.TP
+.B OPENAI_API_KEY
+API key for the OpenAI-compatible endpoint.
+.TP
+.B OPENAI_ENDPOINT
+Base endpoint URL. Defaults to
+.I https://api.openai.com
+.
+.TP
+.B OPENAI_MODEL
+Model name. Defaults to
+.I gpt-4o-mini
+.
+.SH FILES
+.TP
+.I ~/.config/rosie/config.toml
+Persistent local configuration written by
+.BR rosie " " \-\-configure .
+.TP
+.I ~/.local/bin/rosie
+Default install location for the executable when
+.B XDG_BIN_HOME
+is unset.
+.TP
+.I ~/.local/share/man/man1/rosie.1
+Default install location for the man page when
+.B XDG_DATA_HOME
+is unset.
+.SH EXAMPLES
+.TP
+Configure Rosie:
+.B rosie \-\-configure
+.TP
+Install Rosie:
+.B rosie \-\-install
+.TP
+Generate a command from arguments:
+.B rosie show me the top 10 processes by memory usage
+.TP
+Generate a command from standard input:
+.B echo "list all git branches" | rosie
+.SH EXIT STATUS
+.B rosie
+exits with status 0 on success and non-zero on error.

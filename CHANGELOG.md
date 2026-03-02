@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `-configure` for persistent local config in `~/.config/rosie/config.toml`
+- `-install` to copy the current binary into a local bin directory
+- `install.sh` for copy-paste installation from the repo page
+- Man page support, installed alongside the binary during local install
+
+### Changed
+
+- Local config now uses TOML instead of `.env` as the primary configuration path, while environment variables still override stored values
+- Response parsing now strips fenced markdown command blocks before printing the command
+
 ## 0.3.0
 
 ### Changed
