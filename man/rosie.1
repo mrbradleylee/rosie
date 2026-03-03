@@ -7,11 +7,14 @@ rosie \- generate shell commands from natural-language prompts
 .SH DESCRIPTION
 .B rosie
 takes a natural-language task description, sends it to an OpenAI-compatible
-chat completion endpoint, and returns the resulting shell command.
+chat completion endpoint, and returns the resulting shell command with a short
+summary.
 .PP
 Prompts can be passed as trailing arguments or via standard input. In an
 interactive terminal, Rosie offers to execute the generated command, re-enter
-the prompt, or quit after showing the result.
+the prompt, or quit after showing the result and its summary.
+.PP
+Rosie prints the command and summary together in a human-readable format.
 .SH OPTIONS
 .TP
 .B \-\-configure

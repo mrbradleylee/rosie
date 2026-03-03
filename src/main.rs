@@ -56,18 +56,18 @@ async fn main() -> Result<()> {
     let mut prompt = read_prompt(args.prompt, interactive).await?;
 
     loop {
-        let cmd = generate_command_with_spinner(&prompt).await?;
+        let generated = generate_command_with_spinner(&prompt).await?;
 
         if !interactive {
-            println!("{}", cmd);
+            print_generated_command(&generated);
             return Ok(());
         }
 
-        println!("{}", cmd);
+        print_generated_command(&generated);
 
         match prompt_next_action()? {
             NextAction::Execute => {
-                execute_command(&cmd)?;
+                execute_command(&generated.command)?;
                 return Ok(());
             }
             NextAction::ReenterPrompt => {
@@ -90,7 +90,12 @@ struct ChatCompletionRequest {
     messages: Vec<Message>,
 }
 
-async fn llm_generate_command(prompt: &str) -> Result<String> {
+struct GeneratedCommand {
+    command: String,
+    summary: String,
+}
+
+async fn llm_generate_command(prompt: &str) -> Result<GeneratedCommand> {
     use reqwest::Client;
 
     let config = load_config()?;
@@ -115,21 +120,47 @@ async fn llm_generate_command(prompt: &str) -> Result<String> {
         .ok()
         .or(config.model)
         .unwrap_or_else(|| "gpt-4o-mini".into());
-    let prompt_message = format!(
-        "You are an assistant that outputs the exact shell command for the following task, nothing else:\n\n{}",
+    let command_prompt = format!(
+        "You are an assistant that returns JSON with exactly two string fields: \
+         \"command\" for the exact shell command, and \"summary\" for a brief \
+         explanation of what the command does. Return JSON only, with no \
+         markdown fences or extra text.\n\nTask: {}",
         prompt
     );
+    let content = send_chat_completion(&client, &url, &key, &model, command_prompt).await?;
+    let mut generated = extract_generated_command(&content)?;
+
+    if generated.command.is_empty() {
+        return Err(anyhow!("Empty command received"));
+    }
+
+    if generated.summary.is_empty() || generated.summary == "Generated shell command." {
+        generated.summary = generate_summary(&client, &url, &key, &model, prompt, &generated.command)
+            .await?;
+    }
+
+    info!("Command extracted: {}", generated.command);
+    Ok(generated)
+}
+
+async fn send_chat_completion(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    model: &str,
+    content: String,
+) -> Result<String> {
     let request_body = ChatCompletionRequest {
-        model,
+        model: model.to_string(),
         messages: vec![Message {
             role: "user".into(),
-            content: prompt_message,
+            content,
         }],
     };
 
     let resp = client
-        .post(&url)
-        .bearer_auth(&key)
+        .post(url)
+        .bearer_auth(key)
         .json(&request_body)
         .send()
         .await
@@ -143,12 +174,12 @@ async fn llm_generate_command(prompt: &str) -> Result<String> {
         ));
     }
 
-    #[derive(serde::Deserialize)]
+    #[derive(Deserialize)]
     struct CompletionChoice {
         message: Message,
     }
 
-    #[derive(serde::Deserialize)]
+    #[derive(Deserialize)]
     struct CompletionResponse {
         choices: Vec<CompletionChoice>,
     }
@@ -158,23 +189,35 @@ async fn llm_generate_command(prompt: &str) -> Result<String> {
         .await
         .map_err(|e| anyhow!("JSON parse error: {}", e))?;
 
-    let content = completion
+    completion
         .choices
-        .get(0)
-        .ok_or_else(|| anyhow!("No choices returned"))?
-        .message
-        .content
-        .trim()
-        .to_string();
+        .first()
+        .map(|choice| choice.message.content.trim().to_string())
+        .ok_or_else(|| anyhow!("No choices returned"))
+}
 
-    let first_line = extract_command(&content)?;
+async fn generate_summary(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    model: &str,
+    prompt: &str,
+    command: &str,
+) -> Result<String> {
+    let summary_prompt = format!(
+        "Write one short sentence explaining what this shell command does for the task. \
+         Return the sentence only.\n\nTask: {}\nCommand: {}",
+        prompt, command
+    );
 
-    if first_line.is_empty() {
-        return Err(anyhow!("Empty command received"));
+    let summary = send_chat_completion(client, url, key, model, summary_prompt).await?;
+    let summary = summary.trim().trim_matches('"').to_string();
+
+    if summary.is_empty() {
+        return Err(anyhow!("Empty summary received"));
     }
 
-    info!("Command extracted: {}", first_line);
-    Ok(first_line)
+    Ok(summary)
 }
 
 async fn read_prompt(args_prompt: Vec<String>, interactive: bool) -> Result<String> {
@@ -200,7 +243,7 @@ async fn read_prompt(args_prompt: Vec<String>, interactive: bool) -> Result<Stri
     Ok(prompt)
 }
 
-async fn generate_command_with_spinner(prompt: &str) -> Result<String> {
+async fn generate_command_with_spinner(prompt: &str) -> Result<GeneratedCommand> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
     let spinner = tokio::task::spawn_blocking(move || {
@@ -283,16 +326,130 @@ fn execute_command(command: &str) -> Result<()> {
     }
 }
 
-fn extract_command(content: &str) -> Result<String> {
+fn print_generated_command(generated: &GeneratedCommand) {
+    println!("Command: {}", generated.command);
+    println!("Summary: {}", generated.summary);
+}
+
+fn extract_generated_command(content: &str) -> Result<GeneratedCommand> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Err(anyhow!("No content returned"));
     }
 
-    let mut lines = trimmed
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
+    if let Some(response) = parse_generated_response(trimmed)? {
+        return Ok(GeneratedCommand {
+            command: response.command.trim().to_string(),
+            summary: response.summary.trim().to_string(),
+        });
+    }
+
+    if looks_like_structured_response(trimmed) {
+        return Err(anyhow!(
+            "Unable to parse structured command response from model output"
+        ));
+    }
+
+    Ok(GeneratedCommand {
+        command: extract_command(trimmed)?,
+        summary: "Generated shell command.".to_string(),
+    })
+}
+
+fn parse_generated_response(content: &str) -> Result<Option<ParsedGeneratedResponse>> {
+    if let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(content) {
+        return Ok(Some(response));
+    }
+
+    if let Some(unfenced) = strip_code_fence(content) {
+        if let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(unfenced) {
+            return Ok(Some(response));
+        }
+    }
+
+    if let Some(json_slice) = extract_json_object(content) {
+        if let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(json_slice) {
+            return Ok(Some(response));
+        }
+    }
+
+    if let Some(response) = extract_response_fields(content) {
+        return Ok(Some(response));
+    }
+
+    Ok(None)
+}
+
+#[derive(Deserialize)]
+struct ParsedGeneratedResponse {
+    command: String,
+    summary: String,
+}
+
+fn strip_code_fence(content: &str) -> Option<&str> {
+    let trimmed = content.trim();
+    let fenced = trimmed.strip_prefix("```")?;
+    let (_, rest) = fenced.split_once('\n')?;
+    let end = rest.rfind("```")?;
+    Some(rest[..end].trim())
+}
+
+fn extract_json_object(content: &str) -> Option<&str> {
+    let start = content.find('{')?;
+    let end = content.rfind('}')?;
+    (start < end).then_some(content[start..=end].trim())
+}
+
+fn extract_response_fields(content: &str) -> Option<ParsedGeneratedResponse> {
+    let command = extract_quoted_json_field(content, "command")?;
+    let summary = extract_quoted_json_field(content, "summary")?;
+    Some(ParsedGeneratedResponse { command, summary })
+}
+
+fn extract_quoted_json_field(content: &str, field: &str) -> Option<String> {
+    let key = format!("\"{}\"", field);
+    let start = content.find(&key)?;
+    let after_key = &content[start + key.len()..];
+    let colon = after_key.find(':')?;
+    let after_colon = after_key[colon + 1..].trim_start();
+    let quoted = after_colon.strip_prefix('"')?;
+    let mut escaped = false;
+    let mut value = String::new();
+
+    for ch in quoted.chars() {
+        if escaped {
+            value.push(match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '"' => '"',
+                '\\' => '\\',
+                other => other,
+            });
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some(value),
+            other => value.push(other),
+        }
+    }
+
+    None
+}
+
+fn looks_like_structured_response(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with('{')
+        || trimmed.starts_with("```")
+        || trimmed.contains("\"command\"")
+        || trimmed.contains("\"summary\"")
+}
+
+fn extract_command(content: &str) -> Result<String> {
+    let mut lines = content.lines().map(str::trim).filter(|line| !line.is_empty());
     let first = lines.next().ok_or_else(|| anyhow!("No content returned"))?;
 
     if first.starts_with("```") {
