@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `scripts/release.sh` to automate local version bumps, changelog promotion, tagging, and optional push
+- `--dry-run` support in `scripts/release.sh` to validate a release without changing files or creating git objects
+
+### Changed
+
+- GitHub release notes now extract the section matching the pushed tag version instead of reading `Unreleased`
+
 ## 0.3.1
 
 ### Added

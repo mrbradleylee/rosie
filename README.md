@@ -120,6 +120,32 @@ model = "gpt-4o-mini"
 `.env` files are still loaded if present, but they are now a compatibility
 layer for local development rather than the primary setup path.
 
+## Releasing
+
+Prepare a release locally with:
+
+```bash
+./scripts/release.sh 0.3.2
+```
+
+That script expects `CHANGELOG.md` to start with an `Unreleased` section, bumps
+`Cargo.toml`, converts `Unreleased` into the requested version heading, creates
+a fresh `Unreleased` section, runs formatting and checks, commits the release,
+and creates an annotated `v0.3.2` tag locally.
+
+To push both the release commit and tag in one step:
+
+```bash
+./scripts/release.sh 0.3.2 --push
+```
+
+To validate the release flow without changing files, creating a commit, or
+creating a tag:
+
+```bash
+./scripts/release.sh 0.3.2 --dry-run
+```
+
 ## License
 
 This project is licensed under the MIT license – see the [LICENSE](LICENSE)
