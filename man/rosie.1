@@ -10,11 +10,17 @@ takes a natural-language task description, sends it to an OpenAI-compatible
 chat completion endpoint, and returns the resulting shell command with a short
 summary.
 .PP
-Prompts can be passed as trailing arguments or via standard input. In an
-interactive terminal, Rosie offers to execute the generated command, re-enter
-the prompt, or quit after showing the result and its summary.
+Prompts can be passed as trailing arguments or via standard input. When run in
+an interactive terminal without a prompt argument,
+.B rosie
+asks for one before sending the request.
 .PP
-Rosie prints the command and summary together in a human-readable format.
+After showing the generated command and summary, interactive mode offers
+.B execute,
+.B re-enter prompt,
+or
+.B quit.
+Non-interactive mode prints the command and summary and then exits.
 .SH OPTIONS
 .TP
 .B \-\-configure
@@ -75,6 +81,9 @@ Install Rosie:
 .TP
 Generate a command from arguments:
 .B rosie show me the top 10 processes by memory usage
+.TP
+Prompt interactively and then choose whether to execute:
+.B rosie
 .TP
 Generate and then choose whether to execute interactively:
 .B rosie list open ports
