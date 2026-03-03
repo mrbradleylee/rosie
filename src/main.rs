@@ -8,8 +8,10 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::io::BufRead;
+use std::io::IsTerminal;
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{self as tokio_io, AsyncReadExt};
@@ -50,47 +52,30 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let prompt = if args.prompt.is_empty() {
-        let mut buffer = String::new();
-        tokio_io::stdin()
-            .read_to_string(&mut buffer)
-            .await
-            .map_err(|e| anyhow!("stdin error: {}", e))?;
-        buffer.trim().to_string()
-    } else {
-        args.prompt.join(" ")
-    };
-    if prompt.is_empty() {
-        return Err(anyhow!("Prompt cannot be empty"));
-    }
+    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let mut prompt = read_prompt(args.prompt, interactive).await?;
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_clone = Arc::clone(&stop);
-    let spinner = tokio::task::spawn_blocking(move || {
-        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-        let mut i = 0usize;
-        let stderr = std::io::stderr();
-        while !stop_clone.load(Ordering::Relaxed) {
-            {
-                let mut err = stderr.lock();
-                let _ = write!(err, "\r{} Thinking...", frames[i % frames.len()]);
-                let _ = err.flush();
-            }
-            std::thread::sleep(std::time::Duration::from_millis(80));
-            i += 1;
+    loop {
+        let generated = generate_command_with_spinner(&prompt).await?;
+
+        if !interactive {
+            print_generated_command(&generated);
+            return Ok(());
         }
-        let mut err = stderr.lock();
-        let _ = write!(err, "\r\x1b[2K");
-        let _ = err.flush();
-    });
 
-    let result = llm_generate_command(&prompt).await;
-    stop.store(true, Ordering::Relaxed);
-    let _ = spinner.await;
+        print_generated_command(&generated);
 
-    let cmd = result?;
-    println!("{}", cmd);
-    Ok(())
+        match prompt_next_action()? {
+            NextAction::Execute => {
+                execute_command(&generated.command)?;
+                return Ok(());
+            }
+            NextAction::ReenterPrompt => {
+                prompt = prompt_for_line("Prompt")?;
+            }
+            NextAction::Quit => return Ok(()),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,7 +90,12 @@ struct ChatCompletionRequest {
     messages: Vec<Message>,
 }
 
-async fn llm_generate_command(prompt: &str) -> Result<String> {
+struct GeneratedCommand {
+    command: String,
+    summary: String,
+}
+
+async fn llm_generate_command(prompt: &str) -> Result<GeneratedCommand> {
     use reqwest::Client;
 
     let config = load_config()?;
@@ -130,21 +120,47 @@ async fn llm_generate_command(prompt: &str) -> Result<String> {
         .ok()
         .or(config.model)
         .unwrap_or_else(|| "gpt-4o-mini".into());
-    let prompt_message = format!(
-        "You are an assistant that outputs the exact shell command for the following task, nothing else:\n\n{}",
+    let command_prompt = format!(
+        "You are an assistant that returns JSON with exactly two string fields: \
+         \"command\" for the exact shell command, and \"summary\" for a brief \
+         explanation of what the command does. Return JSON only, with no \
+         markdown fences or extra text.\n\nTask: {}",
         prompt
     );
+    let content = send_chat_completion(&client, &url, &key, &model, command_prompt).await?;
+    let mut generated = extract_generated_command(&content)?;
+
+    if generated.command.is_empty() {
+        return Err(anyhow!("Empty command received"));
+    }
+
+    if generated.summary.is_empty() || generated.summary == "Generated shell command." {
+        generated.summary = generate_summary(&client, &url, &key, &model, prompt, &generated.command)
+            .await?;
+    }
+
+    info!("Command extracted: {}", generated.command);
+    Ok(generated)
+}
+
+async fn send_chat_completion(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    model: &str,
+    content: String,
+) -> Result<String> {
     let request_body = ChatCompletionRequest {
-        model,
+        model: model.to_string(),
         messages: vec![Message {
             role: "user".into(),
-            content: prompt_message,
+            content,
         }],
     };
 
     let resp = client
-        .post(&url)
-        .bearer_auth(&key)
+        .post(url)
+        .bearer_auth(key)
         .json(&request_body)
         .send()
         .await
@@ -158,12 +174,12 @@ async fn llm_generate_command(prompt: &str) -> Result<String> {
         ));
     }
 
-    #[derive(serde::Deserialize)]
+    #[derive(Deserialize)]
     struct CompletionChoice {
         message: Message,
     }
 
-    #[derive(serde::Deserialize)]
+    #[derive(Deserialize)]
     struct CompletionResponse {
         choices: Vec<CompletionChoice>,
     }
@@ -173,35 +189,291 @@ async fn llm_generate_command(prompt: &str) -> Result<String> {
         .await
         .map_err(|e| anyhow!("JSON parse error: {}", e))?;
 
-    let content = completion
+    completion
         .choices
-        .get(0)
-        .ok_or_else(|| anyhow!("No choices returned"))?
-        .message
-        .content
-        .trim()
-        .to_string();
-
-    let first_line = extract_command(&content)?;
-
-    if first_line.is_empty() {
-        return Err(anyhow!("Empty command received"));
-    }
-
-    info!("Command extracted: {}", first_line);
-    Ok(first_line)
+        .first()
+        .map(|choice| choice.message.content.trim().to_string())
+        .ok_or_else(|| anyhow!("No choices returned"))
 }
 
-fn extract_command(content: &str) -> Result<String> {
+async fn generate_summary(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    model: &str,
+    prompt: &str,
+    command: &str,
+) -> Result<String> {
+    let summary_prompt = format!(
+        "Write one concise sentence explaining what this shell command does. \
+         Keep it under 12 words when possible. Return the sentence only.\n\nTask: {}\nCommand: {}",
+        prompt, command
+    );
+
+    let summary = send_chat_completion(client, url, key, model, summary_prompt).await?;
+    let summary = summary.trim().trim_matches('"').to_string();
+
+    if summary.is_empty() {
+        return Err(anyhow!("Empty summary received"));
+    }
+
+    Ok(summary)
+}
+
+async fn read_prompt(args_prompt: Vec<String>, interactive: bool) -> Result<String> {
+    let prompt = if args_prompt.is_empty() {
+        if interactive {
+            prompt_for_line("Prompt")?
+        } else {
+            let mut buffer = String::new();
+            tokio_io::stdin()
+                .read_to_string(&mut buffer)
+                .await
+                .map_err(|e| anyhow!("stdin error: {}", e))?;
+            buffer.trim().to_string()
+        }
+    } else {
+        args_prompt.join(" ")
+    };
+
+    if prompt.is_empty() {
+        return Err(anyhow!("Prompt cannot be empty"));
+    }
+
+    Ok(prompt)
+}
+
+async fn generate_command_with_spinner(prompt: &str) -> Result<GeneratedCommand> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+    let spinner = tokio::task::spawn_blocking(move || {
+        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let mut i = 0usize;
+        let stderr = std::io::stderr();
+        while !stop_clone.load(Ordering::Relaxed) {
+            {
+                let mut err = stderr.lock();
+                let _ = write!(err, "\r{} Thinking...", frames[i % frames.len()]);
+                let _ = err.flush();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            i += 1;
+        }
+        let mut err = stderr.lock();
+        let _ = write!(err, "\r\x1b[2K");
+        let _ = err.flush();
+    });
+
+    let result = llm_generate_command(prompt).await;
+    stop.store(true, Ordering::Relaxed);
+    let _ = spinner.await;
+    result
+}
+
+enum NextAction {
+    Execute,
+    ReenterPrompt,
+    Quit,
+}
+
+fn prompt_next_action() -> Result<NextAction> {
+    loop {
+        let action = read_line(&action_prompt())?;
+        match action.trim().to_ascii_lowercase().as_str() {
+            "e" | "execute" => return Ok(NextAction::Execute),
+            "r" | "reenter" | "re-enter" => return Ok(NextAction::ReenterPrompt),
+            "q" | "quit" => return Ok(NextAction::Quit),
+            _ => println!("Enter e, r, or q."),
+        }
+    }
+}
+
+fn prompt_for_line(label: &str) -> Result<String> {
+    let input = read_line(label)?;
+
+    if input.is_empty() {
+        return Err(anyhow!("Prompt cannot be empty"));
+    }
+
+    Ok(input)
+}
+
+fn read_line(label: &str) -> Result<String> {
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "{}: ", label)?;
+    stdout.flush()?;
+
+    let stdin = io::stdin();
+    let mut input = String::new();
+    stdin.lock().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+fn execute_command(command: &str) -> Result<()> {
+    #[cfg(unix)]
+    let status = Command::new(env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
+        .arg("-c")
+        .arg(command)
+        .status()?;
+
+    #[cfg(windows)]
+    let status = Command::new("cmd").args(["/C", command]).status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+fn print_generated_command(generated: &GeneratedCommand) {
+    println!();
+    println!("{}", ansi("1;36", "Command"));
+    println!("  {}", generated.command);
+    println!();
+    println!("  {}", ansi("2", &generated.summary));
+    println!();
+}
+
+fn extract_generated_command(content: &str) -> Result<GeneratedCommand> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Err(anyhow!("No content returned"));
     }
 
-    let mut lines = trimmed
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
+    if let Some(response) = parse_generated_response(trimmed)? {
+        return Ok(GeneratedCommand {
+            command: response.command.trim().to_string(),
+            summary: response.summary.trim().to_string(),
+        });
+    }
+
+    if looks_like_structured_response(trimmed) {
+        return Err(anyhow!(
+            "Unable to parse structured command response from model output"
+        ));
+    }
+
+    Ok(GeneratedCommand {
+        command: extract_command(trimmed)?,
+        summary: "Generated shell command.".to_string(),
+    })
+}
+
+fn parse_generated_response(content: &str) -> Result<Option<ParsedGeneratedResponse>> {
+    if let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(content) {
+        return Ok(Some(response));
+    }
+
+    if let Some(unfenced) = strip_code_fence(content) {
+        if let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(unfenced) {
+            return Ok(Some(response));
+        }
+    }
+
+    if let Some(json_slice) = extract_json_object(content) {
+        if let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(json_slice) {
+            return Ok(Some(response));
+        }
+    }
+
+    if let Some(response) = extract_response_fields(content) {
+        return Ok(Some(response));
+    }
+
+    Ok(None)
+}
+
+#[derive(Deserialize)]
+struct ParsedGeneratedResponse {
+    command: String,
+    summary: String,
+}
+
+fn strip_code_fence(content: &str) -> Option<&str> {
+    let trimmed = content.trim();
+    let fenced = trimmed.strip_prefix("```")?;
+    let (_, rest) = fenced.split_once('\n')?;
+    let end = rest.rfind("```")?;
+    Some(rest[..end].trim())
+}
+
+fn extract_json_object(content: &str) -> Option<&str> {
+    let start = content.find('{')?;
+    let end = content.rfind('}')?;
+    (start < end).then_some(content[start..=end].trim())
+}
+
+fn extract_response_fields(content: &str) -> Option<ParsedGeneratedResponse> {
+    let command = extract_quoted_json_field(content, "command")?;
+    let summary = extract_quoted_json_field(content, "summary")?;
+    Some(ParsedGeneratedResponse { command, summary })
+}
+
+fn extract_quoted_json_field(content: &str, field: &str) -> Option<String> {
+    let key = format!("\"{}\"", field);
+    let start = content.find(&key)?;
+    let after_key = &content[start + key.len()..];
+    let colon = after_key.find(':')?;
+    let after_colon = after_key[colon + 1..].trim_start();
+    let quoted = after_colon.strip_prefix('"')?;
+    let mut escaped = false;
+    let mut value = String::new();
+
+    for ch in quoted.chars() {
+        if escaped {
+            value.push(match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '"' => '"',
+                '\\' => '\\',
+                other => other,
+            });
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some(value),
+            other => value.push(other),
+        }
+    }
+
+    None
+}
+
+fn looks_like_structured_response(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with('{')
+        || trimmed.starts_with("```")
+        || trimmed.contains("\"command\"")
+        || trimmed.contains("\"summary\"")
+}
+
+fn ansi(code: &str, text: &str) -> String {
+    if io::stdout().is_terminal() {
+        format!("\x1b[{}m{}\x1b[0m", code, text)
+    } else {
+        text.to_string()
+    }
+}
+
+fn action_prompt() -> String {
+    format!(
+        "[{}]{}, [{}]{}, or [{}]{}",
+        ansi("1;95", "e"),
+        "xecute",
+        ansi("1;95", "r"),
+        "e-enter prompt",
+        ansi("1;95", "q"),
+        "uit"
+    )
+}
+
+fn extract_command(content: &str) -> Result<String> {
+    let mut lines = content.lines().map(str::trim).filter(|line| !line.is_empty());
     let first = lines.next().ok_or_else(|| anyhow!("No content returned"))?;
 
     if first.starts_with("```") {

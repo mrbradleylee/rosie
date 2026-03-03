@@ -1,10 +1,10 @@
 # Rosie
 
 Rosie is a small CLI written in Rust that takes a natural‑language description
-of a task, sends it to an OpenAI LLM, and returns the exact shell command that
-accomplishes the task. It can read the prompt as trailing arguments or from
-standard input, making it useful as a wrapper for `ssh`, `make`, or as a helper
-in scripts.
+of a task, sends it to an OpenAI LLM, and returns the exact shell command plus
+a short explanation of what it does. It can read the prompt as trailing
+arguments or from standard input, making it useful as a wrapper for `ssh`,
+`make`, or as a helper in scripts.
 
 ## Features
 
@@ -63,6 +63,9 @@ macOS. You may also need to add `~/.local/share/man` to `MANPATH` for
 # Prompt as trailing arguments
 rosie show me the top 10 processes by memory usage
 
+# Prompt interactively when no arguments are provided
+rosie
+
 # Configure persisted settings
 rosie -configure
 
@@ -79,12 +82,22 @@ OPENAI_API_KEY="sk-..." OPENAI_MODEL="gpt-4o-mini" rosie list open ports
 RUST_LOG=info rosie list open ports
 ```
 
-The program will **print** the generated command. Pipe it to `bash` if you
-want to execute it:
+In an interactive terminal, Rosie will show the generated command, print a
+short summary, and let you choose to execute it, re-enter your prompt, or quit.
 
-```bash
-rosie list all git branches | bash
+Example interactive output:
+
+```text
+Command
+  git add .
+
+  Stages modified and tracked files in the current directory.
+
+[e]xecute, [r]e-enter prompt, or [q]uit:
 ```
+
+In non-interactive mode, Rosie prints the command and summary together in a
+human-readable format.
 
 ## Configuration
 

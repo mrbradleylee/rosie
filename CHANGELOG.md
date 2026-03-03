@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- Interactive review flow after command generation with options to execute, re-enter the prompt, or quit
+- Short natural-language summary shown alongside each generated command
+
+### Changed
+
+- Rosie now accepts prompts interactively when run in a terminal with no trailing prompt arguments
+- Terminal output is now formatted for human readability, with ANSI styling for the command display and action hotkeys
+- Structured LLM response parsing is more tolerant of fenced or embedded JSON and no longer falls back to executing malformed JSON fragments as shell commands
+
 ## 0.3.2
 
 ### Added
