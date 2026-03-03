@@ -278,7 +278,11 @@ enum NextAction {
 
 fn prompt_next_action() -> Result<NextAction> {
     loop {
-        let action = read_line("Choose [e]xecute, [r]e-enter prompt, or [q]uit")?;
+        let action = read_line(&format!(
+            "{} {}",
+            ansi("1;33", "Action"),
+            "[e]xecute, [r]e-enter prompt, or [q]uit"
+        ))?;
         match action.trim().to_ascii_lowercase().as_str() {
             "e" | "execute" => return Ok(NextAction::Execute),
             "r" | "reenter" | "re-enter" => return Ok(NextAction::ReenterPrompt),
@@ -327,8 +331,13 @@ fn execute_command(command: &str) -> Result<()> {
 }
 
 fn print_generated_command(generated: &GeneratedCommand) {
-    println!("Command: {}", generated.command);
-    println!("Summary: {}", generated.summary);
+    println!();
+    println!("{}", ansi("1;36", "Command"));
+    println!("  {}", generated.command);
+    println!();
+    println!("{}", ansi("1;32", "Summary"));
+    println!("  {}", ansi("2", &generated.summary));
+    println!();
 }
 
 fn extract_generated_command(content: &str) -> Result<GeneratedCommand> {
@@ -446,6 +455,14 @@ fn looks_like_structured_response(content: &str) -> bool {
         || trimmed.starts_with("```")
         || trimmed.contains("\"command\"")
         || trimmed.contains("\"summary\"")
+}
+
+fn ansi(code: &str, text: &str) -> String {
+    if io::stdout().is_terminal() {
+        format!("\x1b[{}m{}\x1b[0m", code, text)
+    } else {
+        text.to_string()
+    }
 }
 
 fn extract_command(content: &str) -> Result<String> {
