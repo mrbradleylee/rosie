@@ -205,8 +205,8 @@ async fn generate_summary(
     command: &str,
 ) -> Result<String> {
     let summary_prompt = format!(
-        "Write one short sentence explaining what this shell command does for the task. \
-         Return the sentence only.\n\nTask: {}\nCommand: {}",
+        "Write one concise sentence explaining what this shell command does. \
+         Keep it under 12 words when possible. Return the sentence only.\n\nTask: {}\nCommand: {}",
         prompt, command
     );
 
@@ -331,7 +331,6 @@ fn print_generated_command(generated: &GeneratedCommand) {
     println!("{}", ansi("1;36", "Command"));
     println!("  {}", generated.command);
     println!();
-    println!("{}", ansi("1;32", "Summary"));
     println!("  {}", ansi("2", &generated.summary));
     println!();
 }
@@ -463,8 +462,7 @@ fn ansi(code: &str, text: &str) -> String {
 
 fn action_prompt() -> String {
     format!(
-        "{} [{}]{}, [{}]{}, or [{}]{}",
-        ansi("1;33", "Action"),
+        "[{}]{}, [{}]{}, or [{}]{}",
         ansi("1;95", "e"),
         "xecute",
         ansi("1;95", "r"),
