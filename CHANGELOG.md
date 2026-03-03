@@ -4,12 +4,13 @@
 
 ### Added
 
-- `scripts/release.sh` to automate local version bumps, changelog promotion, tagging, and optional push
-- `--dry-run` support in `scripts/release.sh` to validate a release without changing files or creating git objects
+- `cargo-release` based release configuration in `Cargo.toml` for local versioning, tagging, and push workflows
 
 ### Changed
 
+- `Cargo.lock` is now intended to be tracked for reproducible application releases
 - GitHub release notes now extract the section matching the pushed tag version instead of reading `Unreleased`
+- Local release instructions now use `cargo release` instead of the custom `scripts/release.sh` flow
 
 ## 0.3.1
 

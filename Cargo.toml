@@ -13,3 +13,12 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dotenvy = "0.15"
 env_logger = "0.10"
+
+[package.metadata.release]
+allow-branch = ["main"]
+tag-prefix = "v"
+tag-name = "{{prefix}}{{version}}"
+tag-message = "Release {{tag_name}}"
+pre-release-commit-message = "Release {{version}}"
+push-remote = "origin"
+no-dev-version = true

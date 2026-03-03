@@ -122,29 +122,31 @@ layer for local development rather than the primary setup path.
 
 ## Releasing
 
-Prepare a release locally with:
+Use `cargo-release` for local release prep:
 
 ```bash
-./scripts/release.sh 0.3.2
+cargo install cargo-release
 ```
 
-That script expects `CHANGELOG.md` to start with an `Unreleased` section, bumps
-`Cargo.toml`, converts `Unreleased` into the requested version heading, creates
-a fresh `Unreleased` section, runs formatting and checks, commits the release,
-and creates an annotated `v0.3.2` tag locally.
+Before cutting a release, move the current `Unreleased` notes in
+`CHANGELOG.md` into a versioned section such as `## 0.3.2`, then add a fresh
+empty `## Unreleased` section above it.
 
-To push both the release commit and tag in one step:
+Preview the release locally without changing git state:
 
 ```bash
-./scripts/release.sh 0.3.2 --push
+cargo release 0.3.2 --no-publish
 ```
 
-To validate the release flow without changing files, creating a commit, or
-creating a tag:
+Execute the release locally, creating the release commit and `v0.3.2` tag:
 
 ```bash
-./scripts/release.sh 0.3.2 --dry-run
+cargo release 0.3.2 --no-publish --execute
 ```
+
+The release configuration in `Cargo.toml` enforces releases from `main`, uses
+`v`-prefixed tags, and keeps the version at the released value instead of
+bumping to the next development version automatically.
 
 ## License
 
