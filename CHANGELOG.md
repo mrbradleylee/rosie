@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0
+
 ### Added
 
 - Interactive review flow after command generation with options to execute, re-enter the prompt, or quit
