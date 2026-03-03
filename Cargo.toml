@@ -1,6 +1,6 @@
 [package]
 name = "rosie"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 
 [dependencies]
@@ -21,4 +21,3 @@ tag-name = "{{prefix}}{{version}}"
 tag-message = "Release {{tag_name}}"
 pre-release-commit-message = "Release {{version}}"
 push-remote = "origin"
-no-dev-version = true

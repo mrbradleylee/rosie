@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.2
+
 ### Added
 
 - `cargo-release` based release configuration in `Cargo.toml` for local versioning, tagging, and push workflows
@@ -10,7 +12,6 @@
 
 - `Cargo.lock` is now intended to be tracked for reproducible application releases
 - GitHub release notes now extract the section matching the pushed tag version instead of reading `Unreleased`
-- Local release instructions now use `cargo release` instead of the custom `scripts/release.sh` flow
 
 ## 0.3.1
 
