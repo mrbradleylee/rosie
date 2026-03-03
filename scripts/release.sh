@@ -8,9 +8,10 @@ Usage: scripts/release.sh <version> [--push] [--dry-run]
 Prepares a Rosie release from main by:
 - verifying the git working tree is clean
 - updating Cargo.toml to the requested version
+- updating Cargo.lock for the new package version
 - renaming the Unreleased changelog section to the requested version
 - creating a fresh Unreleased section at the top of CHANGELOG.md
-- running cargo fmt and cargo check --locked
+- running cargo fmt and cargo check --offline
 - creating a release commit and annotated tag
 
 Use --push to push both main and the tag after the local release commit is made.
@@ -160,18 +161,18 @@ main() {
     fi
 
     cargo fmt
-    cargo check --locked
+    cargo check --offline
 
     if [ "$dry_run" -eq 1 ]; then
         printf 'Dry run successful for v%s\n' "$version"
-        printf 'Would update Cargo.toml and CHANGELOG.md, commit "Release v%s", and create tag v%s\n' "$version" "$version"
+        printf 'Would update Cargo.toml, Cargo.lock, and CHANGELOG.md, commit "Release v%s", and create tag v%s\n' "$version" "$version"
         if [ "$push" -eq 1 ]; then
             printf 'Would also push main and tag v%s\n' "$version"
         fi
         exit 0
     fi
 
-    git add Cargo.toml CHANGELOG.md
+    git add Cargo.toml Cargo.lock CHANGELOG.md
     git commit -m "Release v$version"
     git tag -a "v$version" -m "Release v$version"
 
