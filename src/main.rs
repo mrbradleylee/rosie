@@ -278,11 +278,7 @@ enum NextAction {
 
 fn prompt_next_action() -> Result<NextAction> {
     loop {
-        let action = read_line(&format!(
-            "{} {}",
-            ansi("1;33", "Action"),
-            "[e]xecute, [r]e-enter prompt, or [q]uit"
-        ))?;
+        let action = read_line(&action_prompt())?;
         match action.trim().to_ascii_lowercase().as_str() {
             "e" | "execute" => return Ok(NextAction::Execute),
             "r" | "reenter" | "re-enter" => return Ok(NextAction::ReenterPrompt),
@@ -463,6 +459,19 @@ fn ansi(code: &str, text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+fn action_prompt() -> String {
+    format!(
+        "{} [{}]{}, [{}]{}, or [{}]{}",
+        ansi("1;33", "Action"),
+        ansi("1;95", "e"),
+        "xecute",
+        ansi("1;95", "r"),
+        "e-enter prompt",
+        ansi("1;95", "q"),
+        "uit"
+    )
 }
 
 fn extract_command(content: &str) -> Result<String> {
