@@ -63,6 +63,9 @@ macOS. You may also need to add `~/.local/share/man` to `MANPATH` for
 # Prompt as trailing arguments
 rosie show me the top 10 processes by memory usage
 
+# Prompt interactively when no arguments are provided
+rosie
+
 # Configure persisted settings
 rosie -configure
 
@@ -81,6 +84,17 @@ RUST_LOG=info rosie list open ports
 
 In an interactive terminal, Rosie will show the generated command, print a
 short summary, and let you choose to execute it, re-enter your prompt, or quit.
+
+Example interactive output:
+
+```text
+Command
+  git add .
+
+  Stages modified and tracked files in the current directory.
+
+[e]xecute, [r]e-enter prompt, or [q]uit:
+```
 
 In non-interactive mode, Rosie prints the command and summary together in a
 human-readable format.
