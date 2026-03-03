@@ -7,9 +7,11 @@ rosie \- generate shell commands from natural-language prompts
 .SH DESCRIPTION
 .B rosie
 takes a natural-language task description, sends it to an OpenAI-compatible
-chat completion endpoint, and prints the resulting shell command.
+chat completion endpoint, and returns the resulting shell command.
 .PP
-Prompts can be passed as trailing arguments or via standard input.
+Prompts can be passed as trailing arguments or via standard input. In an
+interactive terminal, Rosie offers to execute the generated command, re-enter
+the prompt, or quit after showing the result.
 .SH OPTIONS
 .TP
 .B \-\-configure
@@ -70,6 +72,9 @@ Install Rosie:
 .TP
 Generate a command from arguments:
 .B rosie show me the top 10 processes by memory usage
+.TP
+Generate and then choose whether to execute interactively:
+.B rosie list open ports
 .TP
 Generate a command from standard input:
 .B echo "list all git branches" | rosie

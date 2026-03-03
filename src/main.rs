@@ -8,8 +8,10 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::io::BufRead;
+use std::io::IsTerminal;
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{self as tokio_io, AsyncReadExt};
@@ -50,47 +52,30 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let prompt = if args.prompt.is_empty() {
-        let mut buffer = String::new();
-        tokio_io::stdin()
-            .read_to_string(&mut buffer)
-            .await
-            .map_err(|e| anyhow!("stdin error: {}", e))?;
-        buffer.trim().to_string()
-    } else {
-        args.prompt.join(" ")
-    };
-    if prompt.is_empty() {
-        return Err(anyhow!("Prompt cannot be empty"));
-    }
+    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let mut prompt = read_prompt(args.prompt, interactive).await?;
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_clone = Arc::clone(&stop);
-    let spinner = tokio::task::spawn_blocking(move || {
-        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-        let mut i = 0usize;
-        let stderr = std::io::stderr();
-        while !stop_clone.load(Ordering::Relaxed) {
-            {
-                let mut err = stderr.lock();
-                let _ = write!(err, "\r{} Thinking...", frames[i % frames.len()]);
-                let _ = err.flush();
-            }
-            std::thread::sleep(std::time::Duration::from_millis(80));
-            i += 1;
+    loop {
+        let cmd = generate_command_with_spinner(&prompt).await?;
+
+        if !interactive {
+            println!("{}", cmd);
+            return Ok(());
         }
-        let mut err = stderr.lock();
-        let _ = write!(err, "\r\x1b[2K");
-        let _ = err.flush();
-    });
 
-    let result = llm_generate_command(&prompt).await;
-    stop.store(true, Ordering::Relaxed);
-    let _ = spinner.await;
+        println!("{}", cmd);
 
-    let cmd = result?;
-    println!("{}", cmd);
-    Ok(())
+        match prompt_next_action()? {
+            NextAction::Execute => {
+                execute_command(&cmd)?;
+                return Ok(());
+            }
+            NextAction::ReenterPrompt => {
+                prompt = prompt_for_line("Prompt")?;
+            }
+            NextAction::Quit => return Ok(()),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -190,6 +175,112 @@ async fn llm_generate_command(prompt: &str) -> Result<String> {
 
     info!("Command extracted: {}", first_line);
     Ok(first_line)
+}
+
+async fn read_prompt(args_prompt: Vec<String>, interactive: bool) -> Result<String> {
+    let prompt = if args_prompt.is_empty() {
+        if interactive {
+            prompt_for_line("Prompt")?
+        } else {
+            let mut buffer = String::new();
+            tokio_io::stdin()
+                .read_to_string(&mut buffer)
+                .await
+                .map_err(|e| anyhow!("stdin error: {}", e))?;
+            buffer.trim().to_string()
+        }
+    } else {
+        args_prompt.join(" ")
+    };
+
+    if prompt.is_empty() {
+        return Err(anyhow!("Prompt cannot be empty"));
+    }
+
+    Ok(prompt)
+}
+
+async fn generate_command_with_spinner(prompt: &str) -> Result<String> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+    let spinner = tokio::task::spawn_blocking(move || {
+        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let mut i = 0usize;
+        let stderr = std::io::stderr();
+        while !stop_clone.load(Ordering::Relaxed) {
+            {
+                let mut err = stderr.lock();
+                let _ = write!(err, "\r{} Thinking...", frames[i % frames.len()]);
+                let _ = err.flush();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            i += 1;
+        }
+        let mut err = stderr.lock();
+        let _ = write!(err, "\r\x1b[2K");
+        let _ = err.flush();
+    });
+
+    let result = llm_generate_command(prompt).await;
+    stop.store(true, Ordering::Relaxed);
+    let _ = spinner.await;
+    result
+}
+
+enum NextAction {
+    Execute,
+    ReenterPrompt,
+    Quit,
+}
+
+fn prompt_next_action() -> Result<NextAction> {
+    loop {
+        let action = read_line("Choose [e]xecute, [r]e-enter prompt, or [q]uit")?;
+        match action.trim().to_ascii_lowercase().as_str() {
+            "e" | "execute" => return Ok(NextAction::Execute),
+            "r" | "reenter" | "re-enter" => return Ok(NextAction::ReenterPrompt),
+            "q" | "quit" => return Ok(NextAction::Quit),
+            _ => println!("Enter e, r, or q."),
+        }
+    }
+}
+
+fn prompt_for_line(label: &str) -> Result<String> {
+    let input = read_line(label)?;
+
+    if input.is_empty() {
+        return Err(anyhow!("Prompt cannot be empty"));
+    }
+
+    Ok(input)
+}
+
+fn read_line(label: &str) -> Result<String> {
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "{}: ", label)?;
+    stdout.flush()?;
+
+    let stdin = io::stdin();
+    let mut input = String::new();
+    stdin.lock().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+fn execute_command(command: &str) -> Result<()> {
+    #[cfg(unix)]
+    let status = Command::new(env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
+        .arg("-c")
+        .arg(command)
+        .status()?;
+
+    #[cfg(windows)]
+    let status = Command::new("cmd").args(["/C", command]).status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
 fn extract_command(content: &str) -> Result<String> {

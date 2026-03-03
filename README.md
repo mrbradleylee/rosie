@@ -79,8 +79,11 @@ OPENAI_API_KEY="sk-..." OPENAI_MODEL="gpt-4o-mini" rosie list open ports
 RUST_LOG=info rosie list open ports
 ```
 
-The program will **print** the generated command. Pipe it to `bash` if you
-want to execute it:
+In an interactive terminal, Rosie will show the generated command and let you
+choose to execute it, re-enter your prompt, or quit.
+
+In non-interactive mode, Rosie will **print** the generated command. Pipe it to
+`bash` if you want to execute it:
 
 ```bash
 rosie list all git branches | bash
