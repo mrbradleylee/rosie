@@ -31,7 +31,8 @@ Non-interactive mode prints the command and summary and then exits.
 .B \-\-configure
 Interactively create or update the local configuration file. The command now performs 
 automatic model discovery after setting the endpoint. When discovered, you can select from 
-available models by number or full ID; if discovery fails, a default model is used instead.
+available models by number or full ID; if discovery fails, you can choose to
+continue without discovery or exit configuration.
 .TP
 .B \-\-install
 Install the current binary into the local bin directory and install this man
@@ -62,6 +63,10 @@ Recognized environment variables:
 .B ROSIE_API_KEY
 API key for the OpenAI-compatible endpoint. Required for non-local endpoints.
 For localhost endpoints, Rosie falls back to a built-in dummy key if unset.
+For remote endpoints, dummy-key fallback applies only when the endpoint is
+allowlisted in
+.I allow_dummy_key_endpoints
+in the config file.
 .TP
 .B ROSIE_ENDPOINT
 Base endpoint URL. Defaults to

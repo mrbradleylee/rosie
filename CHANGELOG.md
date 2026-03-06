@@ -10,6 +10,7 @@
 - Graceful handling of discovery failures (network errors, missing credentials) without aborting configuration
 - `allow_dummy_key_endpoints` in `~/.config/rosie/config.toml` to explicitly allow dummy-key fallback for non-local endpoints
 - `--configure` prompt for dummy-key fallback endpoints (comma-separated host, host:port, or URL entries)
+- On model discovery failure, `--configure` now prompts whether to continue without discovery or exit
 
 ### Changed  
 - `--configure` now includes automatic model discovery instead of always prompting for a hardcoded default

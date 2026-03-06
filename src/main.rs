@@ -759,15 +759,23 @@ async fn configure() -> Result<()> {
                     None
                 }
             }
-            Err(_) => {
-                // Discovery failed (network error, API error), keep current config model value
-                println!("Model discovery unavailable. Using the default model.");
-                None
+            Err(err) => {
+                // Discovery failed (network/API/etc.), keep current config model value
+                let message = format!("Model discovery failed: {}", err);
+                if prompt_continue_or_exit(&message)? {
+                    None
+                } else {
+                    return Ok(());
+                }
             }
         },
         Err(err) => {
-            println!("Model discovery unavailable: {}", err);
-            None
+            let message = format!("Model discovery unavailable: {}", err);
+            if prompt_continue_or_exit(&message)? {
+                None
+            } else {
+                return Ok(());
+            }
         }
     };
 
@@ -841,6 +849,30 @@ fn parse_csv_list(value: String) -> Option<Vec<String>> {
         None
     } else {
         Some(values)
+    }
+}
+
+fn prompt_continue_or_exit(reason: &str) -> Result<bool> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Ok(true);
+    }
+
+    println!("{}", reason);
+    println!("Continue without model discovery?");
+
+    loop {
+        let choice = prompt_config_value("[c]ontinue or [e]xit", Some("c"), true)?;
+        let normalized = choice.trim().to_ascii_lowercase();
+
+        if normalized.is_empty() || normalized == "c" || normalized == "continue" {
+            return Ok(true);
+        }
+
+        if normalized == "e" || normalized == "exit" {
+            return Ok(false);
+        }
+
+        println!("Please enter 'c' to continue or 'e' to exit.");
     }
 }
 

@@ -96,7 +96,8 @@ short summary, and let you choose to execute it, re-enter your prompt, or quit.
 During `--configure`, after setting the endpoint, Rosie automatically discovers 
 available models from the API (if authenticated) and presents them in a numbered list.
 You can select by number, enter the full model ID, or press Enter to keep the current/default value.
-If discovery fails due to network issues or missing credentials, it falls back gracefully without interrupting configuration.
+If discovery fails (for example due to connection issues or missing credentials),
+Rosie prompts you to continue without discovery or exit configuration.
 
 In `--chat` / `-c` mode, Rosie answers questions naturally without command generation.
 Chat mode is non-interactive - it simply prints the answer once and exits. No execute
