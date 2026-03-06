@@ -23,8 +23,6 @@ async fn main() -> Result<()> {
     dotenv().ok();
     env_logger::init();
 
-    let raw_args = rewrite_configure_flag(env::args_os());
-
     use clap::Parser;
     #[derive(Parser, Debug)]
     struct Args {
@@ -47,8 +45,20 @@ async fn main() -> Result<()> {
         /// Prompt to send to the LLM
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
+
+        /// Display version information (short form: -v)
+        #[arg(short = 'V', long)]
+        version: bool,
     }
+
+    let raw_args = rewrite_configure_flag(env::args_os());
     let args = Args::parse_from(raw_args);
+
+    // Handle version flag
+    if args.version {
+        println!("rosie {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     if args.configure {
         configure().await?;

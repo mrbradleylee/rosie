@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- `--version` / `-V` flag to display the installed version and exit
 - `--model <MODEL>` CLI flag to override the default model for a specific request
 - Model discovery during `--configure`: automatically fetches available models after endpoint setup, presents numbered list for selection
 - Interactive model selection in configure flow: accept number or full ID; falls back to current/default value on invalid input
