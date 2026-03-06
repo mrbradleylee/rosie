@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.1
+
 ### Changed
 
 - Removed the second LLM call for command-summary backfill; when a model response omits a usable summary, Rosie now generates a local heuristic summary instead
