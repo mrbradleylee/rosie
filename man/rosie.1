@@ -29,7 +29,10 @@ Non-interactive mode prints the command and summary and then exits.
 .SH OPTIONS
 .TP
 .B \-\-configure
-Interactively create or update the local configuration file.
+Interactively create or update the local configuration file. The command now performs 
+automatic model discovery after setting the endpoint. When discovered, you can select from 
+available models by number or full ID; if discovery fails, you can choose to
+continue without discovery or exit configuration.
 .TP
 .B \-\-install
 Install the current binary into the local bin directory and install this man
@@ -42,6 +45,9 @@ or interactive options (no execute, re-enter, or quit). Optional model override 
 .TP
 .B \-h, \-\-help
 Print help information.
+.TP
+.IB -V,--version
+Display version information and exit.
 .SH CONFIGURATION
 Rosie reads configuration in this order:
 .IP "1." 4
@@ -54,15 +60,20 @@ Built-in defaults
 .PP
 Recognized environment variables:
 .TP
-.B OPENAI_API_KEY
-API key for the OpenAI-compatible endpoint.
+.B ROSIE_API_KEY
+API key for the OpenAI-compatible endpoint. Required for non-local endpoints.
+For localhost endpoints, Rosie falls back to a built-in dummy key if unset.
+For remote endpoints, dummy-key fallback applies only when the endpoint is
+allowlisted in
+.I allow_dummy_key_endpoints
+in the config file.
 .TP
-.B OPENAI_ENDPOINT
+.B ROSIE_ENDPOINT
 Base endpoint URL. Defaults to
 .I https://api.openai.com
 .
 .TP
-.B OPENAI_MODEL
+.B ROSIE_MODEL
 Model name. Defaults to
 .I gpt-4o-mini
 .
@@ -71,7 +82,7 @@ Model name. Defaults to
 .I ~/.config/rosie/config.toml
 Persistent local configuration written by
 .BR rosie " "--configure .
-Stores API key, endpoint URL, and model name (used for both command and chat modes).
+Stores endpoint URL, model name, and optional dummy-key allowlist entries.
 .TP
 .I ~/.local/bin/rosie
 Default install location for the executable when

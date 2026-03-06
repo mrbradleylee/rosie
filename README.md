@@ -11,8 +11,8 @@ wrapper for `ssh`, `make`, or as a helper in scripts.
 
 - 🎯 Turns plain‑text prompts into shell commands using the OpenAI API
 - 💬 `--chat` / `-c` mode for general Q&A without command generation  
-- 💡 Supports custom models via `OPENAI_MODEL`
-- 🔐 Supports persistent local configuration plus environment variable overrides
+- 💡 Supports custom models via `ROSIE_MODEL`
+- 🔐 Keeps API keys in environment variables (not on disk)
 - 📥 Can install itself into a local bin directory with `rosie -install`
 - 📦 Built in Rust, fast, and has zero runtime dependencies other than standard crates
 - 📦 Cross‑platform (Linux/macOS/Windows with Rust toolchain)
@@ -68,7 +68,7 @@ rosie show me the top 10 processes by memory usage
 # Prompt interactively when no arguments are provided
 rosie
 
-# Configure persisted settings
+# Configure persisted settings (with auto-model discovery)
 rosie -configure
 
 # Install the current binary into your local bin directory
@@ -78,18 +78,30 @@ rosie -install
 echo "Add a new file to the repository" | rosie
 
 # Environment variables override stored config
-OPENAI_API_KEY="sk-..." OPENAI_MODEL="gpt-4o-mini" rosie list open ports
+ROSIE_API_KEY="sk-..." ROSIE_MODEL="gpt-4o-mini" rosie list open ports
+
+# Override model for this specific request (CLI takes precedence)
+rosie --model gpt-3.5-turbo "echo hello world"
 
 # Logging
 RUST_LOG=info rosie list open ports
 
 # Chat mode: general Q&A without command generation (non-interactive)
 rosie --chat "What's the capital of France?"
-
 ```
 
 In an interactive terminal, Rosie will show the generated command, print a
 short summary, and let you choose to execute it, re-enter your prompt, or quit.
+
+During `--configure`, after setting the endpoint, Rosie automatically discovers 
+available models from the API (if authenticated) and presents them in a numbered list.
+You can select by number, enter the full model ID, or press Enter to keep the current/default value.
+If discovery fails (for example due to connection issues or missing credentials),
+Rosie prompts you to continue without discovery or exit configuration.
+
+In `--chat` / `-c` mode, Rosie answers questions naturally without command generation.
+Chat mode is non-interactive - it simply prints the answer once and exits. No execute
+or re-enter options are available.
 
 Example interactive output (command mode):
 
@@ -120,7 +132,7 @@ human-readable format.
 Rosie reads configuration in this order:
 
 1. Environment variables
-2. Local config file at `~/.config/rosie/config.toml`
+2. Local config file at `~/.config/rosie/config.toml` (for endpoint/model and dummy-key allowlist)
 3. Built-in defaults
 
 The preferred setup flow is interactive configuration:
@@ -130,21 +142,28 @@ rosie -configure
 ```
 
 That command creates or updates `~/.config/rosie/config.toml`. Rosie stores
-these values:
+endpoint, model, and an optional dummy-key allowlist. The API key is read from
+`ROSIE_API_KEY` and is never stored on disk.
 
 | Variable | Purpose | Required |
 |----------|---------|----------|
-| `OPENAI_API_KEY` | OpenAI API key | ✅ |
-| `OPENAI_ENDPOINT` | Custom OpenAI compatible endpoint (e.g. Anthropic, OpenRouter) | ❌ (defaults to `https://api.openai.com`) |
-| `OPENAI_MODEL` | The model name used for chat completions | ❌ (defaults to `gpt-4o-mini`) |
+| `ROSIE_API_KEY` | OpenAI API key | ✅ (except localhost endpoints that use dummy-key fallback) |
+| `ROSIE_ENDPOINT` | Custom OpenAI compatible endpoint (e.g. Anthropic, OpenRouter) | ❌ (defaults to `https://api.openai.com`) |
+| `ROSIE_MODEL` | The model name used for chat completions | ❌ (defaults to `gpt-4o-mini`) |
 
 Example config file:
 
 ```toml
-api_key = "sk-..."
 endpoint = "https://api.openai.com"
 model = "gpt-4o-mini"
+allow_dummy_key_endpoints = ["ollama.lan:11434", "http://10.0.0.42:11434"]
 ```
+
+For localhost endpoints such as Ollama (`http://localhost:11434`), Rosie uses
+`ROSIE_API_KEY` when set, and otherwise sends a built-in dummy token (`ollama`)
+to satisfy OpenAI-compatible clients that require a non-empty key.
+For remote endpoints, dummy-key fallback is disabled unless the endpoint host
+is listed in `allow_dummy_key_endpoints`.
 
 `.env` files are still loaded if present, but they are now a compatibility
 layer for local development rather than the primary setup path.
