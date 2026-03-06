@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+- `--model <MODEL>` CLI flag to override the default model for a specific request
+- Model discovery during `--configure`: automatically fetches available models after endpoint setup, presents numbered list for selection
+- Interactive model selection in configure flow: accept number or full ID; falls back to current/default value on invalid input
+- Graceful handling of discovery failures (network errors, missing credentials) without aborting configuration
+
+### Changed  
+- `--configure` now includes automatic model discovery instead of always prompting for a hardcoded default
+
 ## 0.5.0
 
 ### Added

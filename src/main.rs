@@ -40,6 +40,10 @@ async fn main() -> Result<()> {
         #[arg(short = 'c', long = "chat")]
         chat_mode: bool,
 
+        /// Override the default model for this request
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+
         /// Prompt to send to the LLM
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
@@ -47,7 +51,7 @@ async fn main() -> Result<()> {
     let args = Args::parse_from(raw_args);
 
     if args.configure {
-        configure()?;
+        configure().await?;
         return Ok(());
     }
 
@@ -56,19 +60,22 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Capture runtime model override from CLI flag
+    let runtime_model = args.model.clone();
+
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     let mut prompt = read_prompt(args.prompt, interactive).await?;
 
     if args.chat_mode {
         // Chat mode: general Q&A - non-interactive by default
-        let chat_response = generate_chat_with_spinner(&prompt).await?;
+        let chat_response = generate_chat_with_spinner(&prompt, runtime_model.as_deref()).await?;
         
         // Print simple response without formatting (not terminal command style)
         println!("{}", chat_response);
     } else {
         // Command mode: original behavior
         loop {
-            let generated = generate_command_with_spinner(&prompt).await?;
+            let generated = generate_command_with_spinner(&prompt, runtime_model.as_deref()).await?;
 
             if !interactive {
                 print_generated_command(&generated);
@@ -110,7 +117,7 @@ struct GeneratedCommand {
     summary: String,
 }
 
-async fn llm_generate_command(prompt: &str) -> Result<GeneratedCommand> {
+async fn llm_generate_command(prompt: &str, runtime_model: Option<&str>) -> Result<GeneratedCommand> {
     use reqwest::Client;
 
     let config = load_config()?;
@@ -131,10 +138,14 @@ async fn llm_generate_command(prompt: &str) -> Result<GeneratedCommand> {
     let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
 
     let client = Client::new();
-    let model = env::var("OPENAI_MODEL")
-        .ok()
-        .or(config.model)
-        .unwrap_or_else(|| "gpt-4o-mini".into());
+    
+    // Use CLI override if provided, otherwise fall back to env or config model
+    let model_str = runtime_model.map(String::from)
+        .or_else(|| {
+            env::var("OPENAI_MODEL").ok().map(String::from).or(config.model.map(String::from))
+        })
+        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+    
     let command_prompt = format!(
         "You are an assistant that returns JSON with exactly two string fields: \
          \"command\" for the exact shell command, and \"summary\" for a brief \
@@ -142,7 +153,7 @@ async fn llm_generate_command(prompt: &str) -> Result<GeneratedCommand> {
          markdown fences or extra text.\n\nTask: {}",
         prompt
     );
-    let content = send_chat_completion(&client, &url, &key, &model, command_prompt).await?;
+    let content = send_chat_completion(&client, &url, &key, model_str.as_str(), command_prompt).await?;
     let mut generated = extract_generated_command(&content)?;
 
     if generated.command.is_empty() {
@@ -150,15 +161,16 @@ async fn llm_generate_command(prompt: &str) -> Result<GeneratedCommand> {
     }
 
     if generated.summary.is_empty() || generated.summary == "Generated shell command." {
-        generated.summary = generate_summary(&client, &url, &key, &model, prompt, &generated.command)
-            .await?;
+        // Pass model_override here as well for summary generation
+        let summary = generate_summary(&client, &url, &key, model_str.as_str(), prompt, &generated.command).await?;
+        generated.summary = summary;
     }
 
     info!("Command extracted: {}", generated.command);
     Ok(generated)
 }
 
-async fn llm_generate_chat(prompt: &str) -> Result<String> {
+async fn llm_generate_chat(prompt: &str, runtime_model: Option<&str>) -> Result<String> {
     use reqwest::Client;
 
     let config = load_config()?;
@@ -179,10 +191,13 @@ async fn llm_generate_chat(prompt: &str) -> Result<String> {
     let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
 
     let client = Client::new();
-    let model = env::var("OPENAI_MODEL")
-        .ok()
-        .or(config.model)
-        .unwrap_or_else(|| "gpt-4o-mini".into());
+    
+    // Use CLI override if provided, otherwise fall back to env or config model
+    let model_str = runtime_model.map(String::from)
+        .or_else(|| {
+            env::var("OPENAI_MODEL").ok().map(String::from).or(config.model.map(String::from))
+        })
+        .unwrap_or_else(|| "gpt-4o-mini".to_string());
     
     // Different system prompt for chat mode vs command generation
     let chat_prompt = format!(
@@ -190,10 +205,10 @@ async fn llm_generate_chat(prompt: &str) -> Result<String> {
         prompt
     );
     
-    Ok(send_chat_completion(&client, &url, &key, &model, chat_prompt).await?)
+    Ok(send_chat_completion(&client, &url, &key, model_str.as_str(), chat_prompt).await?)
 }
 
-async fn generate_chat_with_spinner(prompt: &str) -> Result<String> {
+async fn generate_chat_with_spinner(prompt: &str, runtime_model: Option<&str>) -> Result<String> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
     let spinner = tokio::task::spawn_blocking(move || {
@@ -214,7 +229,7 @@ async fn generate_chat_with_spinner(prompt: &str) -> Result<String> {
         let _ = err.flush();
     });
 
-    let result = llm_generate_chat(prompt).await;
+    let result = llm_generate_chat(prompt, runtime_model).await;
     stop.store(true, Ordering::Relaxed);
     let _ = spinner.await;
     result
@@ -273,6 +288,47 @@ async fn send_chat_completion(
         .ok_or_else(|| anyhow!("No choices returned"))
 }
 
+/// Discover available models from the API endpoint
+async fn discover_models(endpoint: &str, key: &str) -> Result<Vec<String>> {
+    use reqwest::Client;
+
+    let url = format!("{}/v1/models", endpoint.trim_end_matches('/'));
+
+    let client = Client::new();
+
+    // GET /v1/models - returns list of available models with their IDs
+    let resp = client
+        .get(&url)
+        .bearer_auth(key)
+        .send()
+        .await
+        .map_err(|e| anyhow!("HTTP send error for model discovery: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "Model discovery API returned {}: {}",
+            resp.status(),
+            resp.text().await?
+        ));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ModelInfo {
+        id: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ModelsListResponse {
+        data: Vec<ModelInfo>,
+    }
+
+    let response: ModelsListResponse = resp.json().await.map_err(|e| {
+        anyhow!("Failed to parse model discovery JSON: {}", e)
+    })?;
+
+    Ok(response.data.iter().map(|m| m.id.clone()).collect())
+}
+
 async fn generate_summary(
     client: &reqwest::Client,
     url: &str,
@@ -320,7 +376,7 @@ async fn read_prompt(args_prompt: Vec<String>, interactive: bool) -> Result<Stri
     Ok(prompt)
 }
 
-async fn generate_command_with_spinner(prompt: &str) -> Result<GeneratedCommand> {
+async fn generate_command_with_spinner(prompt: &str, runtime_model: Option<&str>) -> Result<GeneratedCommand> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
     let spinner = tokio::task::spawn_blocking(move || {
@@ -341,7 +397,7 @@ async fn generate_command_with_spinner(prompt: &str) -> Result<GeneratedCommand>
         let _ = err.flush();
     });
 
-    let result = llm_generate_command(prompt).await;
+    let result = llm_generate_command(prompt, runtime_model).await;
     stop.store(true, Ordering::Relaxed);
     let _ = spinner.await;
     result
@@ -635,7 +691,7 @@ fn install() -> Result<()> {
     Ok(())
 }
 
-fn configure() -> Result<()> {
+async fn configure() -> Result<()> {
     let path = config_path()?;
     let existing = load_config()?;
 
@@ -643,17 +699,72 @@ fn configure() -> Result<()> {
     println!("Press enter to keep the current value.");
 
     let api_key = prompt_config_value("API key", existing.api_key.as_deref(), false)?;
+    
+    // Use default endpoint if not set for discovery, then prompt user
     let endpoint = prompt_config_value(
         "Endpoint",
-        existing
-            .endpoint
-            .as_deref()
-            .or(Some("https://api.openai.com")),
+        existing.endpoint.as_deref(),
         true,
     )?;
+
+    // After configuring endpoint, perform model discovery if we have API key
+    let selected_from_discovery = if !api_key.is_empty() {
+        match discover_models(&endpoint, &api_key).await {
+            Ok(models) => {
+                println!();
+                println!("Available models:");
+                
+                // Display numbered list of available models
+                for (i, model_id) in models.iter().enumerate() {
+                    println!("  {}. {}", i + 1, model_id);
+                }
+
+                if !models.is_empty() {
+                    println!();
+                    
+                    let prompt_text = String::from("Select a model by number or enter the full model ID: ");
+                    let input = prompt_config_value(&prompt_text, None::<&str>, false)?;
+                    
+                    // Parse selection - try number first, then exact match, then fallback to current
+                    if !input.is_empty() {
+                        if let Ok(num) = input.parse::<usize>() {
+                            // Try to find matching index (1-based user input -> 0-based vector index)
+                            if num <= models.len() && num >= 1 {
+                                Some(models[num - 1].clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            // Try exact match with full model ID
+                            let idx = models.iter().position(|m| m == &input);
+                            if let Some(idx) = idx {
+                                Some(models[idx].clone())
+                            } else {
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    // No available models - skip selection, use default below
+                    None
+                }
+            }
+            Err(_) => {
+                // Discovery failed (network error, API error), keep current config model value
+                println!("Model discovery unavailable. Using the default model.");
+                None
+            }
+        }
+    } else {
+        // No API key - skip discovery, use default below  
+        None
+    };
+
     let model = prompt_config_value(
         "Model",
-        existing.model.as_deref().or(Some("gpt-4o-mini")),
+        existing.model.as_deref().or(selected_from_discovery.as_ref().map(|s| s.as_str())),
         true,
     )?;
 

@@ -68,7 +68,7 @@ rosie show me the top 10 processes by memory usage
 # Prompt interactively when no arguments are provided
 rosie
 
-# Configure persisted settings
+# Configure persisted settings (with auto-model discovery)
 rosie -configure
 
 # Install the current binary into your local bin directory
@@ -80,16 +80,27 @@ echo "Add a new file to the repository" | rosie
 # Environment variables override stored config
 OPENAI_API_KEY="sk-..." OPENAI_MODEL="gpt-4o-mini" rosie list open ports
 
+# Override model for this specific request (CLI takes precedence)
+rosie --model gpt-3.5-turbo "echo hello world"
+
 # Logging
 RUST_LOG=info rosie list open ports
 
 # Chat mode: general Q&A without command generation (non-interactive)
 rosie --chat "What's the capital of France?"
-
 ```
 
 In an interactive terminal, Rosie will show the generated command, print a
 short summary, and let you choose to execute it, re-enter your prompt, or quit.
+
+During `--configure`, after setting the endpoint, Rosie automatically discovers 
+available models from the API (if authenticated) and presents them in a numbered list.
+You can select by number, enter the full model ID, or press Enter to keep the current/default value.
+If discovery fails due to network issues or missing credentials, it falls back gracefully without interrupting configuration.
+
+In `--chat` / `-c` mode, Rosie answers questions naturally without command generation.
+Chat mode is non-interactive - it simply prints the answer once and exits. No execute
+or re-enter options are available.
 
 Example interactive output (command mode):
 

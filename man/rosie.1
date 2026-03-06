@@ -29,7 +29,9 @@ Non-interactive mode prints the command and summary and then exits.
 .SH OPTIONS
 .TP
 .B \-\-configure
-Interactively create or update the local configuration file.
+Interactively create or update the local configuration file. The command now performs 
+automatic model discovery after setting the endpoint. When discovered, you can select from 
+available models by number or full ID; if discovery fails, a default model is used instead.
 .TP
 .B \-\-install
 Install the current binary into the local bin directory and install this man
