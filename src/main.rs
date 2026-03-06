@@ -131,19 +131,13 @@ async fn llm_generate_command(prompt: &str, runtime_model: Option<&str>) -> Resu
     use reqwest::Client;
 
     let config = load_config()?;
-    let key = env::var("OPENAI_API_KEY")
+    let stored_endpoint = config.endpoint.clone();
+    let stored_model = config.model.clone();
+    let endpoint = env::var("ROSIE_ENDPOINT")
         .ok()
-        .or(config.api_key)
-        .ok_or_else(|| {
-            anyhow!(
-                "OPENAI_API_KEY missing; run `rosie -configure` or set the environment variable"
-            )
-        })?;
-
-    let endpoint = env::var("OPENAI_ENDPOINT")
-        .ok()
-        .or(config.endpoint)
+        .or(stored_endpoint)
         .unwrap_or_else(|| "https://api.openai.com".to_string());
+    let key = resolve_api_key(&endpoint, config.allow_dummy_key_endpoints.as_deref())?;
 
     let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
 
@@ -152,7 +146,7 @@ async fn llm_generate_command(prompt: &str, runtime_model: Option<&str>) -> Resu
     // Use CLI override if provided, otherwise fall back to env or config model
     let model_str = runtime_model.map(String::from)
         .or_else(|| {
-            env::var("OPENAI_MODEL").ok().map(String::from).or(config.model.map(String::from))
+            env::var("ROSIE_MODEL").ok().map(String::from).or(stored_model.map(String::from))
         })
         .unwrap_or_else(|| "gpt-4o-mini".to_string());
     
@@ -184,19 +178,13 @@ async fn llm_generate_chat(prompt: &str, runtime_model: Option<&str>) -> Result<
     use reqwest::Client;
 
     let config = load_config()?;
-    let key = env::var("OPENAI_API_KEY")
+    let stored_endpoint = config.endpoint.clone();
+    let stored_model = config.model.clone();
+    let endpoint = env::var("ROSIE_ENDPOINT")
         .ok()
-        .or(config.api_key)
-        .ok_or_else(|| {
-            anyhow!(
-                "OPENAI_API_KEY missing; run `rosie -configure` or set the environment variable"
-            )
-        })?;
-
-    let endpoint = env::var("OPENAI_ENDPOINT")
-        .ok()
-        .or(config.endpoint)
+        .or(stored_endpoint)
         .unwrap_or_else(|| "https://api.openai.com".to_string());
+    let key = resolve_api_key(&endpoint, config.allow_dummy_key_endpoints.as_deref())?;
 
     let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
 
@@ -205,7 +193,7 @@ async fn llm_generate_chat(prompt: &str, runtime_model: Option<&str>) -> Result<
     // Use CLI override if provided, otherwise fall back to env or config model
     let model_str = runtime_model.map(String::from)
         .or_else(|| {
-            env::var("OPENAI_MODEL").ok().map(String::from).or(config.model.map(String::from))
+            env::var("ROSIE_MODEL").ok().map(String::from).or(stored_model.map(String::from))
         })
         .unwrap_or_else(|| "gpt-4o-mini".to_string());
     
@@ -634,9 +622,9 @@ fn extract_command(content: &str) -> Result<String> {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoredConfig {
-    api_key: Option<String>,
     endpoint: Option<String>,
     model: Option<String>,
+    allow_dummy_key_endpoints: Option<Vec<String>>,
 }
 
 fn rewrite_configure_flag<I>(args: I) -> Vec<std::ffi::OsString>
@@ -707,8 +695,7 @@ async fn configure() -> Result<()> {
 
     println!("Rosie configuration");
     println!("Press enter to keep the current value.");
-
-    let api_key = prompt_config_value("API key", existing.api_key.as_deref(), false)?;
+    println!("ROSIE_API_KEY is read from the environment and is not stored on disk.");
     
     // Use default endpoint if not set for discovery, then prompt user
     let endpoint = prompt_config_value(
@@ -717,13 +704,24 @@ async fn configure() -> Result<()> {
         true,
     )?;
 
-    // After configuring endpoint, perform model discovery if we have API key
-    let selected_from_discovery = if !api_key.is_empty() {
-        match discover_models(&endpoint, &api_key).await {
+    let current_dummy_key_allowlist = existing
+        .allow_dummy_key_endpoints
+        .as_ref()
+        .map(|values| values.join(","));
+    let dummy_key_allowlist = prompt_config_value(
+        "Dummy-key fallback endpoints (comma-separated hosts, host:port, or URLs)",
+        current_dummy_key_allowlist.as_deref(),
+        true,
+    )?;
+
+    let parsed_dummy_key_allowlist = parse_csv_list(dummy_key_allowlist);
+
+    let selected_from_discovery = match resolve_api_key(&endpoint, parsed_dummy_key_allowlist.as_deref()) {
+        Ok(api_key) => match discover_models(&endpoint, &api_key).await {
             Ok(models) => {
                 println!();
                 println!("Available models:");
-                
+
                 // Display numbered list of available models
                 for (i, model_id) in models.iter().enumerate() {
                     println!("  {}. {}", i + 1, model_id);
@@ -731,10 +729,10 @@ async fn configure() -> Result<()> {
 
                 if !models.is_empty() {
                     println!();
-                    
+
                     let prompt_text = String::from("Select a model by number or enter the full model ID: ");
                     let input = prompt_config_value(&prompt_text, None::<&str>, false)?;
-                    
+
                     // Parse selection - try number first, then exact match, then fallback to current
                     if !input.is_empty() {
                         if let Ok(num) = input.parse::<usize>() {
@@ -766,10 +764,11 @@ async fn configure() -> Result<()> {
                 println!("Model discovery unavailable. Using the default model.");
                 None
             }
+        },
+        Err(err) => {
+            println!("Model discovery unavailable: {}", err);
+            None
         }
-    } else {
-        // No API key - skip discovery, use default below  
-        None
     };
 
     let model = prompt_config_value(
@@ -779,9 +778,9 @@ async fn configure() -> Result<()> {
     )?;
 
     let config = StoredConfig {
-        api_key: normalize_config_value(api_key),
         endpoint: normalize_config_value(endpoint),
         model: normalize_config_value(model),
+        allow_dummy_key_endpoints: parsed_dummy_key_allowlist,
     };
 
     if let Some(parent) = path.parent() {
@@ -830,6 +829,21 @@ fn normalize_config_value(value: String) -> Option<String> {
     }
 }
 
+fn parse_csv_list(value: String) -> Option<Vec<String>> {
+    let values = value
+        .split(',')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_string())
+        .collect::<Vec<_>>();
+
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
 fn load_config() -> Result<StoredConfig> {
     let path = config_path()?;
     match fs::read_to_string(path) {
@@ -837,6 +851,73 @@ fn load_config() -> Result<StoredConfig> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(StoredConfig::default()),
         Err(err) => Err(err.into()),
     }
+}
+
+fn resolve_api_key(endpoint: &str, allow_dummy_key_endpoints: Option<&[String]>) -> Result<String> {
+    if let Ok(key) = env::var("ROSIE_API_KEY") {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    if is_local_endpoint(endpoint) || endpoint_in_allowlist(endpoint, allow_dummy_key_endpoints) {
+        // OpenAI-compatible local providers (for example Ollama) may require
+        // a non-empty Authorization header but do not validate the token value.
+        return Ok("ollama".to_string());
+    }
+
+    Err(anyhow!(
+        "ROSIE_API_KEY missing; set the environment variable, use a localhost endpoint, or add the endpoint to allow_dummy_key_endpoints in config.toml"
+    ))
+}
+
+fn is_local_endpoint(endpoint: &str) -> bool {
+    let Some((host, _port)) = parse_endpoint_host_and_port(endpoint) else {
+        return false;
+    };
+
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+fn endpoint_in_allowlist(endpoint: &str, allow_dummy_key_endpoints: Option<&[String]>) -> bool {
+    let Some((host, port)) = parse_endpoint_host_and_port(endpoint) else {
+        return false;
+    };
+
+    let Some(allowlist) = allow_dummy_key_endpoints else {
+        return false;
+    };
+
+    for entry in allowlist {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some((allowed_host, allowed_port)) = parse_endpoint_host_and_port(trimmed) {
+            if host.eq_ignore_ascii_case(&allowed_host)
+                && (allowed_port.is_none() || allowed_port == port)
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn parse_endpoint_host_and_port(value: &str) -> Option<(String, Option<u16>)> {
+    let normalized = if value.contains("://") {
+        value.to_string()
+    } else {
+        format!("https://{}", value)
+    };
+
+    let url = reqwest::Url::parse(&normalized).ok()?;
+    let host = url.host_str()?.to_string();
+    let port = url.port();
+    Some((host, port))
 }
 
 fn config_path() -> Result<PathBuf> {

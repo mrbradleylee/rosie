@@ -8,9 +8,20 @@
 - Model discovery during `--configure`: automatically fetches available models after endpoint setup, presents numbered list for selection
 - Interactive model selection in configure flow: accept number or full ID; falls back to current/default value on invalid input
 - Graceful handling of discovery failures (network errors, missing credentials) without aborting configuration
+- `allow_dummy_key_endpoints` in `~/.config/rosie/config.toml` to explicitly allow dummy-key fallback for non-local endpoints
+- `--configure` prompt for dummy-key fallback endpoints (comma-separated host, host:port, or URL entries)
 
 ### Changed  
 - `--configure` now includes automatic model discovery instead of always prompting for a hardcoded default
+- Environment variable names changed from `OPENAI_*` to `ROSIE_*` (`ROSIE_API_KEY`, `ROSIE_ENDPOINT`, `ROSIE_MODEL`)
+- API key loading is now environment-only via `ROSIE_API_KEY`; API keys are no longer read from `config.toml`
+- `--configure` no longer prompts for or stores API key; it assumes env-based API key handling
+- Dummy-key fallback now applies to localhost endpoints by default and to remote endpoints only when listed in `allow_dummy_key_endpoints`
+- **Breaking**: removed support for `OPENAI_*` environment variables (no compatibility fallback)
+- **Breaking**: `config.toml` `api_key` values are ignored for authentication and must be migrated to `ROSIE_API_KEY`
+
+### Removed
+- Persistent `api_key` storage in `~/.config/rosie/config.toml`
 
 ## 0.5.0
 

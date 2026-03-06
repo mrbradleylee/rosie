@@ -59,15 +59,16 @@ Built-in defaults
 .PP
 Recognized environment variables:
 .TP
-.B OPENAI_API_KEY
-API key for the OpenAI-compatible endpoint.
+.B ROSIE_API_KEY
+API key for the OpenAI-compatible endpoint. Required for non-local endpoints.
+For localhost endpoints, Rosie falls back to a built-in dummy key if unset.
 .TP
-.B OPENAI_ENDPOINT
+.B ROSIE_ENDPOINT
 Base endpoint URL. Defaults to
 .I https://api.openai.com
 .
 .TP
-.B OPENAI_MODEL
+.B ROSIE_MODEL
 Model name. Defaults to
 .I gpt-4o-mini
 .
@@ -76,7 +77,7 @@ Model name. Defaults to
 .I ~/.config/rosie/config.toml
 Persistent local configuration written by
 .BR rosie " "--configure .
-Stores API key, endpoint URL, and model name (used for both command and chat modes).
+Stores endpoint URL, model name, and optional dummy-key allowlist entries.
 .TP
 .I ~/.local/bin/rosie
 Default install location for the executable when

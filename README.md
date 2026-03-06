@@ -11,8 +11,8 @@ wrapper for `ssh`, `make`, or as a helper in scripts.
 
 - 🎯 Turns plain‑text prompts into shell commands using the OpenAI API
 - 💬 `--chat` / `-c` mode for general Q&A without command generation  
-- 💡 Supports custom models via `OPENAI_MODEL`
-- 🔐 Supports persistent local configuration plus environment variable overrides
+- 💡 Supports custom models via `ROSIE_MODEL`
+- 🔐 Keeps API keys in environment variables (not on disk)
 - 📥 Can install itself into a local bin directory with `rosie -install`
 - 📦 Built in Rust, fast, and has zero runtime dependencies other than standard crates
 - 📦 Cross‑platform (Linux/macOS/Windows with Rust toolchain)
@@ -78,7 +78,7 @@ rosie -install
 echo "Add a new file to the repository" | rosie
 
 # Environment variables override stored config
-OPENAI_API_KEY="sk-..." OPENAI_MODEL="gpt-4o-mini" rosie list open ports
+ROSIE_API_KEY="sk-..." ROSIE_MODEL="gpt-4o-mini" rosie list open ports
 
 # Override model for this specific request (CLI takes precedence)
 rosie --model gpt-3.5-turbo "echo hello world"
@@ -131,7 +131,7 @@ human-readable format.
 Rosie reads configuration in this order:
 
 1. Environment variables
-2. Local config file at `~/.config/rosie/config.toml`
+2. Local config file at `~/.config/rosie/config.toml` (for endpoint/model and dummy-key allowlist)
 3. Built-in defaults
 
 The preferred setup flow is interactive configuration:
@@ -141,21 +141,28 @@ rosie -configure
 ```
 
 That command creates or updates `~/.config/rosie/config.toml`. Rosie stores
-these values:
+endpoint, model, and an optional dummy-key allowlist. The API key is read from
+`ROSIE_API_KEY` and is never stored on disk.
 
 | Variable | Purpose | Required |
 |----------|---------|----------|
-| `OPENAI_API_KEY` | OpenAI API key | ✅ |
-| `OPENAI_ENDPOINT` | Custom OpenAI compatible endpoint (e.g. Anthropic, OpenRouter) | ❌ (defaults to `https://api.openai.com`) |
-| `OPENAI_MODEL` | The model name used for chat completions | ❌ (defaults to `gpt-4o-mini`) |
+| `ROSIE_API_KEY` | OpenAI API key | ✅ (except localhost endpoints that use dummy-key fallback) |
+| `ROSIE_ENDPOINT` | Custom OpenAI compatible endpoint (e.g. Anthropic, OpenRouter) | ❌ (defaults to `https://api.openai.com`) |
+| `ROSIE_MODEL` | The model name used for chat completions | ❌ (defaults to `gpt-4o-mini`) |
 
 Example config file:
 
 ```toml
-api_key = "sk-..."
 endpoint = "https://api.openai.com"
 model = "gpt-4o-mini"
+allow_dummy_key_endpoints = ["ollama.lan:11434", "http://10.0.0.42:11434"]
 ```
+
+For localhost endpoints such as Ollama (`http://localhost:11434`), Rosie uses
+`ROSIE_API_KEY` when set, and otherwise sends a built-in dummy token (`ollama`)
+to satisfy OpenAI-compatible clients that require a non-empty key.
+For remote endpoints, dummy-key fallback is disabled unless the endpoint host
+is listed in `allow_dummy_key_endpoints`.
 
 `.env` files are still loaded if present, but they are now a compatibility
 layer for local development rather than the primary setup path.
