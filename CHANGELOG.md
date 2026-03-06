@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `--chat` / `-c` mode for general Q&A instead of command generation (non-interactive)
+
 ## 0.4.0
 
 ### Added
@@ -11,7 +15,7 @@
 
 ### Changed
 
-- Rosie now accepts prompts interactively when run in a terminal with no trailing prompt arguments
+- Rosie now accepts prompts interactively when run in a terminal with no trailing prompt arguments  
 - Terminal output is now formatted for human readability, with ANSI styling for the command display and action hotkeys
 - Structured LLM response parsing is more tolerant of fenced or embedded JSON and no longer falls back to executing malformed JSON fragments as shell commands
 
