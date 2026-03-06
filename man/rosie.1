@@ -1,19 +1,24 @@
 .TH ROSIE 1
 .SH NAME
-rosie \- generate shell commands from natural-language prompts
+rosie \- generate shell commands from natural-language prompts or answer questions in chat mode
 .SH SYNOPSIS
 .B rosie
 [\fIOPTIONS\fR] [\fIPROMPT\fR]...
+.IB --chat,-c
+[ \fI--model MODE\fR | \fI-MODEL=MODE\fR ] [ \fI-PROMPT PROM\fR ]...
 .SH DESCRIPTION
 .B rosie
 takes a natural-language task description, sends it to an OpenAI-compatible
 chat completion endpoint, and returns the resulting shell command with a short
-summary.
+summary. Alternatively, when run in
+.I --chat
+mode (or with \fB\-c\fR), it answers general questions naturally without generating commands. Chat mode is non-interactive - the answer is printed once and the program exits.
 .PP
 Prompts can be passed as trailing arguments or via standard input. When run in
 an interactive terminal without a prompt argument,
 .B rosie
-asks for one before sending the request.
+asks for one before sending the request. In chat mode, you can re-enter questions
+until quitting.
 .PP
 After showing the generated command and summary, interactive mode offers
 .B execute,
@@ -29,6 +34,11 @@ Interactively create or update the local configuration file.
 .B \-\-install
 Install the current binary into the local bin directory and install this man
 page into the local man directory when available.
+.TP
+.BI --chat,-c [ \fI--model MODE\fR ]
+Run in chat mode to answer general questions instead of generating shell commands.
+Note: Chat mode is non-interactive - returns a simple text answer without formatting
+or interactive options (no execute, re-enter, or quit). Optional model override (defaults to gpt-4o-mini).
 .TP
 .B \-h, \-\-help
 Print help information.
@@ -60,7 +70,8 @@ Model name. Defaults to
 .TP
 .I ~/.config/rosie/config.toml
 Persistent local configuration written by
-.BR rosie " " \-\-configure .
+.BR rosie " "--configure .
+Stores API key, endpoint URL, and model name (used for both command and chat modes).
 .TP
 .I ~/.local/bin/rosie
 Default install location for the executable when
@@ -85,8 +96,8 @@ Generate a command from arguments:
 Prompt interactively and then choose whether to execute:
 .B rosie
 .TP
-Generate and then choose whether to execute interactively:
-.B rosie list open ports
+Run in chat mode for general Q&A:
+.B rosie --chat "What's the capital of France?"
 .TP
 Generate a command from standard input:
 .B echo "list all git branches" | rosie

@@ -2,13 +2,15 @@
 
 Rosie is a small CLI written in Rust that takes a natural‑language description
 of a task, sends it to an OpenAI LLM, and returns the exact shell command plus
-a short explanation of what it does. It can read the prompt as trailing
-arguments or from standard input, making it useful as a wrapper for `ssh`,
-`make`, or as a helper in scripts.
+a short explanation of what it does. Alternatively, with `--chat` mode (or `-c`), 
+it can answer general questions naturally without generating commands. It can read 
+the prompt as trailing arguments or from standard input, making it useful as a 
+wrapper for `ssh`, `make`, or as a helper in scripts.
 
 ## Features
 
 - 🎯 Turns plain‑text prompts into shell commands using the OpenAI API
+- 💬 `--chat` / `-c` mode for general Q&A without command generation  
 - 💡 Supports custom models via `OPENAI_MODEL`
 - 🔐 Supports persistent local configuration plus environment variable overrides
 - 📥 Can install itself into a local bin directory with `rosie -install`
@@ -80,12 +82,16 @@ OPENAI_API_KEY="sk-..." OPENAI_MODEL="gpt-4o-mini" rosie list open ports
 
 # Logging
 RUST_LOG=info rosie list open ports
+
+# Chat mode: general Q&A without command generation (non-interactive)
+rosie --chat "What's the capital of France?"
+
 ```
 
 In an interactive terminal, Rosie will show the generated command, print a
 short summary, and let you choose to execute it, re-enter your prompt, or quit.
 
-Example interactive output:
+Example interactive output (command mode):
 
 ```text
 Command
@@ -96,7 +102,17 @@ Command
 [e]xecute, [r]e-enter prompt, or [q]uit:
 ```
 
-In non-interactive mode, Rosie prints the command and summary together in a
+In `--chat` / `-c` mode, Rosie answers questions naturally without command generation.
+Chat mode is non-interactive - it simply prints the answer once and exits. No execute
+or re-enter options are available.
+
+Example output (chat mode):
+
+```text
+Paris is the capital city of France.
+```
+
+In non-interactive mode, Rosie prints the command/answer together in a
 human-readable format.
 
 ## Configuration

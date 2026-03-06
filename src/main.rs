@@ -36,6 +36,10 @@ async fn main() -> Result<()> {
         #[arg(long)]
         install: bool,
 
+        /// Force chat mode (general Q&A instead of command generation)
+        #[arg(short = 'c', long = "chat")]
+        chat_mode: bool,
+
         /// Prompt to send to the LLM
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
@@ -55,27 +59,38 @@ async fn main() -> Result<()> {
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     let mut prompt = read_prompt(args.prompt, interactive).await?;
 
-    loop {
-        let generated = generate_command_with_spinner(&prompt).await?;
+    if args.chat_mode {
+        // Chat mode: general Q&A - non-interactive by default
+        let chat_response = generate_chat_with_spinner(&prompt).await?;
+        
+        // Print simple response without formatting (not terminal command style)
+        println!("{}", chat_response);
+    } else {
+        // Command mode: original behavior
+        loop {
+            let generated = generate_command_with_spinner(&prompt).await?;
 
-        if !interactive {
-            print_generated_command(&generated);
-            return Ok(());
-        }
-
-        print_generated_command(&generated);
-
-        match prompt_next_action()? {
-            NextAction::Execute => {
-                execute_command(&generated.command)?;
+            if !interactive {
+                print_generated_command(&generated);
                 return Ok(());
             }
-            NextAction::ReenterPrompt => {
-                prompt = prompt_for_line("Prompt")?;
+
+            print_generated_command(&generated);
+
+            match prompt_next_action()? {
+                NextAction::Execute => {
+                    execute_command(&generated.command)?;
+                    return Ok(());
+                }
+                NextAction::ReenterPrompt => {
+                    prompt = prompt_for_line("Prompt")?;
+                }
+                NextAction::Quit => return Ok(()),
             }
-            NextAction::Quit => return Ok(()),
         }
     }
+
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -141,6 +156,68 @@ async fn llm_generate_command(prompt: &str) -> Result<GeneratedCommand> {
 
     info!("Command extracted: {}", generated.command);
     Ok(generated)
+}
+
+async fn llm_generate_chat(prompt: &str) -> Result<String> {
+    use reqwest::Client;
+
+    let config = load_config()?;
+    let key = env::var("OPENAI_API_KEY")
+        .ok()
+        .or(config.api_key)
+        .ok_or_else(|| {
+            anyhow!(
+                "OPENAI_API_KEY missing; run `rosie -configure` or set the environment variable"
+            )
+        })?;
+
+    let endpoint = env::var("OPENAI_ENDPOINT")
+        .ok()
+        .or(config.endpoint)
+        .unwrap_or_else(|| "https://api.openai.com".to_string());
+
+    let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
+
+    let client = Client::new();
+    let model = env::var("OPENAI_MODEL")
+        .ok()
+        .or(config.model)
+        .unwrap_or_else(|| "gpt-4o-mini".into());
+    
+    // Different system prompt for chat mode vs command generation
+    let chat_prompt = format!(
+        "You are a helpful assistant that answers questions naturally.\n\nAnswer the user's question clearly and concisely. Return your answer directly, without markdown fences or extra text.\n\nTask: {}",
+        prompt
+    );
+    
+    Ok(send_chat_completion(&client, &url, &key, &model, chat_prompt).await?)
+}
+
+async fn generate_chat_with_spinner(prompt: &str) -> Result<String> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+    let spinner = tokio::task::spawn_blocking(move || {
+        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let mut i = 0usize;
+        let stderr = std::io::stderr();
+        while !stop_clone.load(Ordering::Relaxed) {
+            {
+                let mut err = stderr.lock();
+                let _ = write!(err, "\r{} Thinking...", frames[i % frames.len()]);
+                let _ = err.flush();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            i += 1;
+        }
+        let mut err = stderr.lock();
+        let _ = write!(err, "\r\x1b[2K");
+        let _ = err.flush();
+    });
+
+    let result = llm_generate_chat(prompt).await;
+    stop.store(true, Ordering::Relaxed);
+    let _ = spinner.await;
+    result
 }
 
 async fn send_chat_completion(
