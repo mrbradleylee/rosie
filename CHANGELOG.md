@@ -2,7 +2,10 @@
 
 ## Unreleased
 
+## 0.6.0
+
 ### Added
+
 - `--version` / `-V` flag to display the installed version and exit
 - `--model <MODEL>` CLI flag to override the default model for a specific request
 - Model discovery during `--configure`: automatically fetches available models after endpoint setup, presents numbered list for selection
@@ -13,6 +16,7 @@
 - On model discovery failure, `--configure` now prompts whether to continue without discovery or exit
 
 ### Changed  
+
 - `--configure` now includes automatic model discovery instead of always prompting for a hardcoded default
 - Environment variable names changed from `OPENAI_*` to `ROSIE_*` (`ROSIE_API_KEY`, `ROSIE_ENDPOINT`, `ROSIE_MODEL`)
 - API key loading is now environment-only via `ROSIE_API_KEY`; API keys are no longer read from `config.toml`
@@ -22,6 +26,7 @@
 - **Breaking**: `config.toml` `api_key` values are ignored for authentication and must be migrated to `ROSIE_API_KEY`
 
 ### Removed
+
 - Persistent `api_key` storage in `~/.config/rosie/config.toml`
 
 ## 0.5.0
