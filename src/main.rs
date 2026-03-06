@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::future::Future;
 use std::io;
 use std::io::BufRead;
 use std::io::IsTerminal;
@@ -79,13 +80,14 @@ async fn main() -> Result<()> {
     if args.chat_mode {
         // Chat mode: general Q&A - non-interactive by default
         let chat_response = generate_chat_with_spinner(&prompt, runtime_model.as_deref()).await?;
-        
+
         // Print simple response without formatting (not terminal command style)
         println!("{}", chat_response);
     } else {
         // Command mode: original behavior
         loop {
-            let generated = generate_command_with_spinner(&prompt, runtime_model.as_deref()).await?;
+            let generated =
+                generate_command_with_spinner(&prompt, runtime_model.as_deref()).await?;
 
             if !interactive {
                 print_generated_command(&generated);
@@ -127,29 +129,18 @@ struct GeneratedCommand {
     summary: String,
 }
 
-async fn llm_generate_command(prompt: &str, runtime_model: Option<&str>) -> Result<GeneratedCommand> {
-    use reqwest::Client;
+struct RequestContext {
+    client: reqwest::Client,
+    url: String,
+    key: String,
+    model: String,
+}
 
-    let config = load_config()?;
-    let stored_endpoint = config.endpoint.clone();
-    let stored_model = config.model.clone();
-    let endpoint = env::var("ROSIE_ENDPOINT")
-        .ok()
-        .or(stored_endpoint)
-        .unwrap_or_else(|| "https://api.openai.com".to_string());
-    let key = resolve_api_key(&endpoint, config.allow_dummy_key_endpoints.as_deref())?;
-
-    let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
-
-    let client = Client::new();
-    
-    // Use CLI override if provided, otherwise fall back to env or config model
-    let model_str = runtime_model.map(String::from)
-        .or_else(|| {
-            env::var("ROSIE_MODEL").ok().map(String::from).or(stored_model.map(String::from))
-        })
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
-    
+async fn llm_generate_command(
+    prompt: &str,
+    runtime_model: Option<&str>,
+) -> Result<GeneratedCommand> {
+    let ctx = resolve_request_context(runtime_model)?;
     let command_prompt = format!(
         "You are an assistant that returns JSON with exactly two string fields: \
          \"command\" for the exact shell command, and \"summary\" for a brief \
@@ -157,7 +148,8 @@ async fn llm_generate_command(prompt: &str, runtime_model: Option<&str>) -> Resu
          markdown fences or extra text.\n\nTask: {}",
         prompt
     );
-    let content = send_chat_completion(&client, &url, &key, model_str.as_str(), command_prompt).await?;
+    let content =
+        send_chat_completion(&ctx.client, &ctx.url, &ctx.key, &ctx.model, command_prompt).await?;
     let mut generated = extract_generated_command(&content)?;
 
     if generated.command.is_empty() {
@@ -165,9 +157,7 @@ async fn llm_generate_command(prompt: &str, runtime_model: Option<&str>) -> Resu
     }
 
     if generated.summary.is_empty() || generated.summary == "Generated shell command." {
-        // Pass model_override here as well for summary generation
-        let summary = generate_summary(&client, &url, &key, model_str.as_str(), prompt, &generated.command).await?;
-        generated.summary = summary;
+        generated.summary = fallback_summary(&generated.command);
     }
 
     info!("Command extracted: {}", generated.command);
@@ -175,62 +165,17 @@ async fn llm_generate_command(prompt: &str, runtime_model: Option<&str>) -> Resu
 }
 
 async fn llm_generate_chat(prompt: &str, runtime_model: Option<&str>) -> Result<String> {
-    use reqwest::Client;
-
-    let config = load_config()?;
-    let stored_endpoint = config.endpoint.clone();
-    let stored_model = config.model.clone();
-    let endpoint = env::var("ROSIE_ENDPOINT")
-        .ok()
-        .or(stored_endpoint)
-        .unwrap_or_else(|| "https://api.openai.com".to_string());
-    let key = resolve_api_key(&endpoint, config.allow_dummy_key_endpoints.as_deref())?;
-
-    let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
-
-    let client = Client::new();
-    
-    // Use CLI override if provided, otherwise fall back to env or config model
-    let model_str = runtime_model.map(String::from)
-        .or_else(|| {
-            env::var("ROSIE_MODEL").ok().map(String::from).or(stored_model.map(String::from))
-        })
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
-    
-    // Different system prompt for chat mode vs command generation
+    let ctx = resolve_request_context(runtime_model)?;
     let chat_prompt = format!(
         "You are a helpful assistant that answers questions naturally.\n\nAnswer the user's question clearly and concisely. Return your answer directly, without markdown fences or extra text.\n\nTask: {}",
         prompt
     );
-    
-    Ok(send_chat_completion(&client, &url, &key, model_str.as_str(), chat_prompt).await?)
+
+    send_chat_completion(&ctx.client, &ctx.url, &ctx.key, &ctx.model, chat_prompt).await
 }
 
 async fn generate_chat_with_spinner(prompt: &str, runtime_model: Option<&str>) -> Result<String> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_clone = Arc::clone(&stop);
-    let spinner = tokio::task::spawn_blocking(move || {
-        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-        let mut i = 0usize;
-        let stderr = std::io::stderr();
-        while !stop_clone.load(Ordering::Relaxed) {
-            {
-                let mut err = stderr.lock();
-                let _ = write!(err, "\r{} Thinking...", frames[i % frames.len()]);
-                let _ = err.flush();
-            }
-            std::thread::sleep(std::time::Duration::from_millis(80));
-            i += 1;
-        }
-        let mut err = stderr.lock();
-        let _ = write!(err, "\r\x1b[2K");
-        let _ = err.flush();
-    });
-
-    let result = llm_generate_chat(prompt, runtime_model).await;
-    stop.store(true, Ordering::Relaxed);
-    let _ = spinner.await;
-    result
+    with_spinner(llm_generate_chat(prompt, runtime_model)).await
 }
 
 async fn send_chat_completion(
@@ -320,35 +265,12 @@ async fn discover_models(endpoint: &str, key: &str) -> Result<Vec<String>> {
         data: Vec<ModelInfo>,
     }
 
-    let response: ModelsListResponse = resp.json().await.map_err(|e| {
-        anyhow!("Failed to parse model discovery JSON: {}", e)
-    })?;
+    let response: ModelsListResponse = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("Failed to parse model discovery JSON: {}", e))?;
 
     Ok(response.data.iter().map(|m| m.id.clone()).collect())
-}
-
-async fn generate_summary(
-    client: &reqwest::Client,
-    url: &str,
-    key: &str,
-    model: &str,
-    prompt: &str,
-    command: &str,
-) -> Result<String> {
-    let summary_prompt = format!(
-        "Write one concise sentence explaining what this shell command does. \
-         Keep it under 12 words when possible. Return the sentence only.\n\nTask: {}\nCommand: {}",
-        prompt, command
-    );
-
-    let summary = send_chat_completion(client, url, key, model, summary_prompt).await?;
-    let summary = summary.trim().trim_matches('"').to_string();
-
-    if summary.is_empty() {
-        return Err(anyhow!("Empty summary received"));
-    }
-
-    Ok(summary)
 }
 
 async fn read_prompt(args_prompt: Vec<String>, interactive: bool) -> Result<String> {
@@ -374,7 +296,17 @@ async fn read_prompt(args_prompt: Vec<String>, interactive: bool) -> Result<Stri
     Ok(prompt)
 }
 
-async fn generate_command_with_spinner(prompt: &str, runtime_model: Option<&str>) -> Result<GeneratedCommand> {
+async fn generate_command_with_spinner(
+    prompt: &str,
+    runtime_model: Option<&str>,
+) -> Result<GeneratedCommand> {
+    with_spinner(llm_generate_command(prompt, runtime_model)).await
+}
+
+async fn with_spinner<T, Fut>(future: Fut) -> Result<T>
+where
+    Fut: Future<Output = Result<T>>,
+{
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
     let spinner = tokio::task::spawn_blocking(move || {
@@ -395,10 +327,30 @@ async fn generate_command_with_spinner(prompt: &str, runtime_model: Option<&str>
         let _ = err.flush();
     });
 
-    let result = llm_generate_command(prompt, runtime_model).await;
+    let result = future.await;
     stop.store(true, Ordering::Relaxed);
     let _ = spinner.await;
     result
+}
+
+fn resolve_request_context(runtime_model: Option<&str>) -> Result<RequestContext> {
+    let config = load_config()?;
+    let endpoint = env::var("ROSIE_ENDPOINT")
+        .ok()
+        .or(config.endpoint)
+        .unwrap_or_else(|| "https://api.openai.com".to_string());
+    let key = resolve_api_key(&endpoint, config.allow_dummy_key_endpoints.as_deref())?;
+    let model = runtime_model
+        .map(str::to_owned)
+        .or_else(|| env::var("ROSIE_MODEL").ok().or(config.model))
+        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+
+    Ok(RequestContext {
+        client: reqwest::Client::new(),
+        url: format!("{}/v1/chat/completions", endpoint.trim_end_matches('/')),
+        key,
+        model,
+    })
 }
 
 enum NextAction {
@@ -496,16 +448,16 @@ fn parse_generated_response(content: &str) -> Result<Option<ParsedGeneratedRespo
         return Ok(Some(response));
     }
 
-    if let Some(unfenced) = strip_code_fence(content) {
-        if let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(unfenced) {
-            return Ok(Some(response));
-        }
+    if let Some(unfenced) = strip_code_fence(content)
+        && let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(unfenced)
+    {
+        return Ok(Some(response));
     }
 
-    if let Some(json_slice) = extract_json_object(content) {
-        if let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(json_slice) {
-            return Ok(Some(response));
-        }
+    if let Some(json_slice) = extract_json_object(content)
+        && let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(json_slice)
+    {
+        return Ok(Some(response));
     }
 
     if let Some(response) = extract_response_fields(content) {
@@ -604,13 +556,16 @@ fn action_prompt() -> String {
 }
 
 fn extract_command(content: &str) -> Result<String> {
-    let mut lines = content.lines().map(str::trim).filter(|line| !line.is_empty());
+    let mut lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
     let first = lines.next().ok_or_else(|| anyhow!("No content returned"))?;
 
     if first.starts_with("```") {
-        for line in lines {
+        if let Some(line) = lines.next() {
             if line.starts_with("```") {
-                break;
+                return Err(anyhow!("Empty command received"));
             }
             return Ok(line.to_string());
         }
@@ -618,6 +573,187 @@ fn extract_command(content: &str) -> Result<String> {
     }
 
     Ok(first.to_string())
+}
+
+fn fallback_summary(command: &str) -> String {
+    let segment = first_command_segment(command);
+    let tokens = shellish_tokens(segment);
+    let Some((program, args)) = extract_program_and_args(&tokens) else {
+        return "Runs shell command.".to_string();
+    };
+
+    if let Some(summary) = summarize_known_command(program, args) {
+        return summary.to_string();
+    }
+
+    format!("Runs {}.", summarize_program_name(program))
+}
+
+fn first_command_segment(command: &str) -> &str {
+    command
+        .split("&&")
+        .next()
+        .unwrap_or(command)
+        .split("||")
+        .next()
+        .unwrap_or(command)
+        .split(['|', ';'])
+        .next()
+        .unwrap_or(command)
+        .trim()
+}
+
+fn shellish_tokens(segment: &str) -> Vec<String> {
+    segment
+        .split_whitespace()
+        .map(|token| {
+            token
+                .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')' | '{' | '}'))
+                .to_string()
+        })
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn extract_program_and_args(tokens: &[String]) -> Option<(&str, &[String])> {
+    let mut index = 0usize;
+
+    while let Some(token) = tokens.get(index) {
+        if matches!(
+            token.as_str(),
+            "sudo" | "env" | "command" | "nohup" | "time"
+        ) {
+            index += 1;
+            continue;
+        }
+
+        if is_env_assignment(token) {
+            index += 1;
+            continue;
+        }
+
+        return Some((token.as_str(), &tokens[index + 1..]));
+    }
+
+    None
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    let Some((name, _value)) = token.split_once('=') else {
+        return false;
+    };
+
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn summarize_known_command(program: &str, args: &[String]) -> Option<&'static str> {
+    let subcommand = args.first().map(String::as_str).unwrap_or("");
+
+    match program {
+        "git" => match subcommand {
+            "status" => Some("Shows the current git working tree status."),
+            "add" => Some("Stages files with git."),
+            "commit" => Some("Creates a git commit."),
+            "push" => Some("Pushes git commits to a remote."),
+            "pull" => Some("Fetches and merges remote git changes."),
+            "fetch" => Some("Fetches changes from a git remote."),
+            "clone" => Some("Clones a git repository."),
+            "checkout" | "switch" => Some("Switches git branches or revisions."),
+            "restore" => Some("Restores files from git."),
+            "diff" => Some("Shows git changes."),
+            "log" => Some("Shows git commit history."),
+            "branch" => Some("Lists or manages git branches."),
+            "merge" => Some("Merges git branches."),
+            "rebase" => Some("Rebases git commits onto another base."),
+            "reset" => Some("Moves or resets git history."),
+            "clean" => Some("Removes untracked files from a git repository."),
+            _ => Some("Runs a git command."),
+        },
+        "cargo" => match subcommand {
+            "build" => Some("Builds the Rust project."),
+            "run" => Some("Builds and runs the Rust project."),
+            "test" => Some("Runs Rust tests."),
+            "check" => Some("Checks the Rust project for compilation errors."),
+            "fmt" => Some("Formats Rust source files."),
+            "clippy" => Some("Runs Rust lints with Clippy."),
+            "update" => Some("Updates Cargo dependencies."),
+            "install" => Some("Installs a Rust binary with Cargo."),
+            _ => Some("Runs a Cargo command."),
+        },
+        "docker" => match subcommand {
+            "build" => Some("Builds a Docker image."),
+            "run" => Some("Runs a Docker container."),
+            "exec" => Some("Runs a command inside a Docker container."),
+            "ps" => Some("Lists Docker containers."),
+            "images" => Some("Lists Docker images."),
+            "logs" => Some("Shows Docker container logs."),
+            "pull" => Some("Pulls a Docker image."),
+            "push" => Some("Pushes a Docker image."),
+            "compose" => Some("Runs a Docker Compose command."),
+            _ => Some("Runs a Docker command."),
+        },
+        "kubectl" => match subcommand {
+            "get" => Some("Lists Kubernetes resources."),
+            "describe" => Some("Shows detailed Kubernetes resource information."),
+            "apply" => Some("Applies Kubernetes configuration."),
+            "delete" => Some("Deletes Kubernetes resources."),
+            "logs" => Some("Shows Kubernetes pod logs."),
+            "exec" => Some("Runs a command in a Kubernetes container."),
+            _ => Some("Runs a kubectl command."),
+        },
+        "npm" | "pnpm" | "yarn" | "bun" => match subcommand {
+            "install" | "add" => Some("Installs project dependencies."),
+            "run" => Some("Runs a package script."),
+            "test" => Some("Runs project tests."),
+            "publish" => Some("Publishes a package."),
+            _ => Some("Runs a package manager command."),
+        },
+        "python" | "python3" => Some("Runs a Python command."),
+        "node" => Some("Runs a Node.js command."),
+        "pip" | "pip3" => Some("Installs or manages Python packages."),
+        "make" => Some("Runs a Make target."),
+        "grep" | "rg" => Some("Searches for matching text."),
+        "find" => Some("Finds files or directories."),
+        "ls" => Some("Lists directory contents."),
+        "cat" => Some("Prints file contents."),
+        "cp" => Some("Copies files or directories."),
+        "mv" => Some("Moves or renames files."),
+        "rm" => Some("Removes files or directories."),
+        "mkdir" => Some("Creates directories."),
+        "chmod" => Some("Changes file permissions."),
+        "chown" => Some("Changes file ownership."),
+        "curl" | "wget" => Some("Fetches data from a URL."),
+        "ssh" => Some("Connects to a remote shell over SSH."),
+        "scp" => Some("Copies files over SSH."),
+        "rsync" => Some("Synchronizes files between locations."),
+        "tar" => Some("Creates or extracts tar archives."),
+        "zip" => Some("Creates a zip archive."),
+        "unzip" => Some("Extracts a zip archive."),
+        "ps" => Some("Lists running processes."),
+        "kill" | "killall" | "pkill" => Some("Stops running processes."),
+        "sed" => Some("Transforms text with sed."),
+        "awk" => Some("Processes text with awk."),
+        "sort" => Some("Sorts input lines."),
+        "uniq" => Some("Filters repeated lines."),
+        "head" => Some("Shows the first lines of input."),
+        "tail" => Some("Shows the last lines of input."),
+        "du" => Some("Shows disk usage."),
+        "df" => Some("Shows filesystem usage."),
+        "cd" => Some("Changes into a directory."),
+        _ => None,
+    }
+}
+
+fn summarize_program_name(program: &str) -> String {
+    let name = program
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("command");
+    format!("`{}`", name)
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -696,13 +832,9 @@ async fn configure() -> Result<()> {
     println!("Rosie configuration");
     println!("Press enter to keep the current value.");
     println!("ROSIE_API_KEY is read from the environment and is not stored on disk.");
-    
+
     // Use default endpoint if not set for discovery, then prompt user
-    let endpoint = prompt_config_value(
-        "Endpoint",
-        existing.endpoint.as_deref(),
-        true,
-    )?;
+    let endpoint = prompt_config_value("Endpoint", existing.endpoint.as_deref(), true)?;
 
     let current_dummy_key_allowlist = existing
         .allow_dummy_key_endpoints
@@ -716,72 +848,75 @@ async fn configure() -> Result<()> {
 
     let parsed_dummy_key_allowlist = parse_csv_list(dummy_key_allowlist);
 
-    let selected_from_discovery = match resolve_api_key(&endpoint, parsed_dummy_key_allowlist.as_deref()) {
-        Ok(api_key) => match discover_models(&endpoint, &api_key).await {
-            Ok(models) => {
-                println!();
-                println!("Available models:");
-
-                // Display numbered list of available models
-                for (i, model_id) in models.iter().enumerate() {
-                    println!("  {}. {}", i + 1, model_id);
-                }
-
-                if !models.is_empty() {
+    let selected_from_discovery =
+        match resolve_api_key(&endpoint, parsed_dummy_key_allowlist.as_deref()) {
+            Ok(api_key) => match discover_models(&endpoint, &api_key).await {
+                Ok(models) => {
                     println!();
+                    println!("Available models:");
 
-                    let prompt_text = String::from("Select a model by number or enter the full model ID: ");
-                    let input = prompt_config_value(&prompt_text, None::<&str>, false)?;
+                    // Display numbered list of available models
+                    for (i, model_id) in models.iter().enumerate() {
+                        println!("  {}. {}", i + 1, model_id);
+                    }
 
-                    // Parse selection - try number first, then exact match, then fallback to current
-                    if !input.is_empty() {
-                        if let Ok(num) = input.parse::<usize>() {
-                            // Try to find matching index (1-based user input -> 0-based vector index)
-                            if num <= models.len() && num >= 1 {
-                                Some(models[num - 1].clone())
+                    if !models.is_empty() {
+                        println!();
+
+                        let prompt_text =
+                            String::from("Select a model by number or enter the full model ID: ");
+                        let input = prompt_config_value(&prompt_text, None::<&str>, false)?;
+
+                        // Parse selection - try number first, then exact match, then fallback to current
+                        if !input.is_empty() {
+                            if let Ok(num) = input.parse::<usize>() {
+                                // Try to find matching index (1-based user input -> 0-based vector index)
+                                if num <= models.len() && num >= 1 {
+                                    Some(models[num - 1].clone())
+                                } else {
+                                    None
+                                }
                             } else {
-                                None
+                                // Try exact match with full model ID
+                                models
+                                    .iter()
+                                    .position(|m| m == &input)
+                                    .map(|idx| models[idx].clone())
                             }
                         } else {
-                            // Try exact match with full model ID
-                            let idx = models.iter().position(|m| m == &input);
-                            if let Some(idx) = idx {
-                                Some(models[idx].clone())
-                            } else {
-                                None
-                            }
+                            None
                         }
                     } else {
+                        // No available models - skip selection, use default below
                         None
                     }
-                } else {
-                    // No available models - skip selection, use default below
-                    None
                 }
-            }
+                Err(err) => {
+                    // Discovery failed (network/API/etc.), keep current config model value
+                    let message = format!("Model discovery failed: {}", err);
+                    if prompt_continue_or_exit(&message)? {
+                        None
+                    } else {
+                        return Ok(());
+                    }
+                }
+            },
             Err(err) => {
-                // Discovery failed (network/API/etc.), keep current config model value
-                let message = format!("Model discovery failed: {}", err);
+                let message = format!("Model discovery unavailable: {}", err);
                 if prompt_continue_or_exit(&message)? {
                     None
                 } else {
                     return Ok(());
                 }
             }
-        },
-        Err(err) => {
-            let message = format!("Model discovery unavailable: {}", err);
-            if prompt_continue_or_exit(&message)? {
-                None
-            } else {
-                return Ok(());
-            }
-        }
-    };
+        };
 
     let model = prompt_config_value(
         "Model",
-        existing.model.as_deref().or(selected_from_discovery.as_ref().map(|s| s.as_str())),
+        existing
+            .model
+            .as_deref()
+            .or(selected_from_discovery.as_deref()),
         true,
     )?;
 
@@ -927,12 +1062,11 @@ fn endpoint_in_allowlist(endpoint: &str, allow_dummy_key_endpoints: Option<&[Str
             continue;
         }
 
-        if let Some((allowed_host, allowed_port)) = parse_endpoint_host_and_port(trimmed) {
-            if host.eq_ignore_ascii_case(&allowed_host)
-                && (allowed_port.is_none() || allowed_port == port)
-            {
-                return true;
-            }
+        if let Some((allowed_host, allowed_port)) = parse_endpoint_host_and_port(trimmed)
+            && host.eq_ignore_ascii_case(&allowed_host)
+            && (allowed_port.is_none() || allowed_port == port)
+        {
+            return true;
         }
     }
 

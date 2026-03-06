@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- Removed the second LLM call for command-summary backfill; when a model response omits a usable summary, Rosie now generates a local heuristic summary instead
+- Added a local fallback summary engine for common command families (`git`, `cargo`, `docker`, `kubectl`, package managers, and common shell tools), with a generic fallback for unknown programs
+- Consolidated duplicate request-context and spinner logic in command/chat generation paths to reduce repeated code
+- Reduced dependency overhead by narrowing `tokio` features and disabling `reqwest` default features while keeping `rustls-tls`
+
 ## 0.6.0
 
 ### Added
