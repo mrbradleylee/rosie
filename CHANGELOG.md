@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.0
+
 ### Added
 
 - `--chat` / `-c` mode for general Q&A instead of command generation (non-interactive)
