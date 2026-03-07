@@ -703,7 +703,12 @@ fn run_loop(
                 });
                 app.transcript_view_width = transcript_inner.width.max(1) as usize;
                 app.transcript_view_height = transcript_inner.height.max(1) as usize;
-                let transcript_lines = transcript_lines(&app.messages, app.is_busy(), theme);
+                let transcript_lines = transcript_lines(
+                    &app.messages,
+                    app.is_busy(),
+                    theme,
+                    app.transcript_view_width,
+                );
                 let conversation_title = conversation_header_title(&app);
                 let transcript_title_spans = vec![Span::styled(
                     conversation_title,
@@ -2666,6 +2671,7 @@ fn transcript_lines(
     messages: &[ChatMessage],
     is_busy: bool,
     theme: ThemePalette,
+    _view_width: usize,
 ) -> Vec<Line<'static>> {
     if messages.is_empty() {
         return vec![Line::styled(
@@ -2681,6 +2687,29 @@ fn transcript_lines(
             "assistant" => ("Assistant", theme.assistant),
             _ => ("System", theme.system),
         };
+        let wrap_pad = "  ";
+        let is_assistant = message.role == "assistant";
+        if message.role == "assistant" {
+            rows.push(Line::raw(""));
+            rows.push(Line::from(vec![
+                Span::styled(
+                    "──────────────── ".to_string(),
+                    Style::default().fg(theme.title_meta),
+                ),
+                Span::styled("🤖 ".to_string(), Style::default().fg(theme.title_label)),
+                Span::styled(
+                    "Rosie".to_string(),
+                    Style::default()
+                        .fg(theme.title_label)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " ────────────────".to_string(),
+                    Style::default().fg(theme.title_meta),
+                ),
+            ]));
+            rows.push(Line::raw(""));
+        }
         let is_pending_assistant = is_busy
             && message.role == "assistant"
             && idx + 1 == messages.len()
@@ -2694,28 +2723,37 @@ fn transcript_lines(
         };
         let mut lines = content.lines();
         if let Some(first) = lines.next() {
-            rows.push(Line::from(vec![
-                Span::styled(
-                    format!("{label}:"),
-                    Style::default()
-                        .fg(label_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!(" {first}"), Style::default().fg(theme.text)),
-            ]));
+            if is_assistant {
+                rows.push(Line::styled(
+                    first.to_string(),
+                    Style::default().fg(theme.text),
+                ));
+            } else {
+                rows.push(Line::from(vec![
+                    Span::styled(
+                        format!("{label}:"),
+                        Style::default()
+                            .fg(label_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!(" {first}"), Style::default().fg(theme.text)),
+                ]));
+            }
             for line in lines {
                 rows.push(Line::styled(
-                    format!("  {line}"),
+                    format!("{wrap_pad}{line}"),
                     Style::default().fg(theme.text),
                 ));
             }
         } else {
-            rows.push(Line::styled(
-                format!("{label}:"),
-                Style::default()
-                    .fg(label_color)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            if !is_assistant {
+                rows.push(Line::styled(
+                    format!("{label}:"),
+                    Style::default()
+                        .fg(label_color)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
         }
         rows.push(Line::raw(""));
     }
