@@ -51,6 +51,11 @@ struct AppState {
     pending_g: bool,
     pending_d: bool,
     in_flight: Option<InFlightRequest>,
+    model_fetch: Option<InFlightModelFetch>,
+    model_options: Vec<String>,
+    model_selected_index: usize,
+    model_loading: bool,
+    model_error: Option<String>,
     pending_delete_session_id: Option<i64>,
     status_message: String,
 }
@@ -84,6 +89,11 @@ impl AppState {
             pending_g: false,
             pending_d: false,
             in_flight: None,
+            model_fetch: None,
+            model_options: Vec::new(),
+            model_selected_index: 0,
+            model_loading: false,
+            model_error: None,
             pending_delete_session_id: None,
             status_message: format!(
                 "Loaded session #{}. Press i to enter Insert mode.",
@@ -109,6 +119,7 @@ enum InputMode {
     Insert,
     CommandPalette,
     ConfirmDelete,
+    ModelSelect,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -290,10 +301,20 @@ enum StreamEvent {
     Error(String),
 }
 
+enum ModelFetchEvent {
+    Loaded(Vec<String>),
+    Error(String),
+}
+
 struct InFlightRequest {
     receiver: mpsc::UnboundedReceiver<StreamEvent>,
     handle: JoinHandle<()>,
     assistant_message_id: i64,
+}
+
+struct InFlightModelFetch {
+    receiver: mpsc::UnboundedReceiver<ModelFetchEvent>,
+    handle: JoinHandle<()>,
 }
 
 fn run_loop(
@@ -321,6 +342,7 @@ fn run_loop(
 
     loop {
         process_stream_events(&mut app);
+        process_model_fetch_events(&mut app);
 
         terminal.draw(|frame| {
             let root = Layout::default()
@@ -338,6 +360,7 @@ fn run_loop(
                 InputMode::Insert => "INSERT",
                 InputMode::CommandPalette => "COMMAND",
                 InputMode::ConfirmDelete => "CONFIRM",
+                InputMode::ModelSelect => "MODELS",
             };
             let header = Paragraph::new(format!(
                 "Rosie TUI | Mode: {mode_label} | Host: {} | Model: {}{}",
@@ -416,6 +439,7 @@ fn run_loop(
                 InputMode::Insert => "Enter: send | Backspace: edit | Esc: normal",
                 InputMode::CommandPalette => "Type command | Enter: run | Esc: cancel",
                 InputMode::ConfirmDelete => "Confirm delete: Enter/y=yes, n/Esc=no",
+                InputMode::ModelSelect => "Model picker: j/k move | Enter select | Esc cancel",
             };
             let footer = Paragraph::new(format!("{} | {}", footer_help, app.status_message))
                 .style(Style::default().add_modifier(Modifier::DIM));
@@ -441,6 +465,36 @@ fn run_loop(
                 .alignment(Alignment::Left);
                 frame.render_widget(Clear, popup);
                 frame.render_widget(confirm, popup);
+            } else if app.mode == InputMode::ModelSelect {
+                let popup = centered_rect(70, 12, frame.area());
+                let mut rows = Vec::new();
+                if app.model_loading {
+                    rows.push("Loading models from Ollama...".to_string());
+                } else if let Some(error) = app.model_error.as_deref() {
+                    rows.push(format!("Failed to load models: {error}"));
+                } else if app.model_options.is_empty() {
+                    rows.push("No models available from /api/tags".to_string());
+                } else {
+                    rows.push("Select a model (Enter to apply):".to_string());
+                    rows.push(String::new());
+                    for (idx, model) in app.model_options.iter().enumerate() {
+                        let marker = if idx == app.model_selected_index {
+                            ">"
+                        } else {
+                            " "
+                        };
+                        let active = if *model == app.model { "*" } else { " " };
+                        rows.push(format!("{marker}{active} {model}"));
+                    }
+                }
+
+                let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
+                let picker = Paragraph::new(lines)
+                    .block(Block::default().borders(Borders::ALL).title("Models"))
+                    .alignment(Alignment::Left)
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(Clear, popup);
+                frame.render_widget(picker, popup);
             }
         })?;
 
@@ -450,6 +504,7 @@ fn run_loop(
         {
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 cancel_request(&mut app, true);
+                cancel_model_fetch(&mut app);
                 break;
             }
 
@@ -619,6 +674,7 @@ fn run_loop(
                     KeyCode::Enter => {
                         if run_palette_command(&mut app) {
                             cancel_request(&mut app, true);
+                            cancel_model_fetch(&mut app);
                             break;
                         }
                     }
@@ -638,6 +694,28 @@ fn run_loop(
                         app.pending_delete_session_id = None;
                         app.mode = InputMode::Normal;
                         app.status_message = "Delete cancelled.".to_string();
+                    }
+                    _ => {}
+                },
+                InputMode::ModelSelect => match key.code {
+                    KeyCode::Esc => {
+                        cancel_model_fetch(&mut app);
+                        app.mode = InputMode::Normal;
+                        app.status_message = "Model picker cancelled.".to_string();
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if !app.model_options.is_empty() {
+                            app.model_selected_index =
+                                (app.model_selected_index + 1).min(app.model_options.len() - 1);
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if !app.model_options.is_empty() {
+                            app.model_selected_index = app.model_selected_index.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Enter => {
+                        apply_selected_model(&mut app);
                     }
                     _ => {}
                 },
@@ -765,6 +843,51 @@ fn process_stream_events(app: &mut AppState) {
     if done {
         app.in_flight = None;
         refresh_sessions(app, Some(app.active_session_id));
+    }
+}
+
+fn process_model_fetch_events(app: &mut AppState) {
+    let Some(fetch) = app.model_fetch.as_mut() else {
+        return;
+    };
+
+    let mut done = false;
+    loop {
+        match fetch.receiver.try_recv() {
+            Ok(ModelFetchEvent::Loaded(models)) => {
+                app.model_options = models;
+                app.model_loading = false;
+                app.model_error = None;
+                app.model_selected_index = app
+                    .model_options
+                    .iter()
+                    .position(|name| name == &app.model)
+                    .unwrap_or(0);
+                app.status_message = if app.model_options.is_empty() {
+                    "Model picker loaded: no models found.".to_string()
+                } else {
+                    format!("Loaded {} model(s).", app.model_options.len())
+                };
+                done = true;
+            }
+            Ok(ModelFetchEvent::Error(message)) => {
+                app.model_loading = false;
+                app.model_options.clear();
+                app.model_selected_index = 0;
+                app.model_error = Some(message.clone());
+                app.status_message = format!("Model discovery error: {message}");
+                done = true;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                done = true;
+                break;
+            }
+        }
+    }
+
+    if done {
+        app.model_fetch = None;
     }
 }
 
@@ -1033,6 +1156,57 @@ fn confirm_delete_session(app: &mut AppState) {
     }
 }
 
+fn open_model_picker(app: &mut AppState) {
+    cancel_model_fetch(app);
+    app.mode = InputMode::ModelSelect;
+    app.model_options.clear();
+    app.model_selected_index = 0;
+    app.model_loading = true;
+    app.model_error = None;
+    app.status_message = "Loading models from Ollama...".to_string();
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let host = app.host.clone();
+    let handle = tokio::spawn(async move {
+        match fetch_ollama_models(&host).await {
+            Ok(models) => {
+                let _ = tx.send(ModelFetchEvent::Loaded(models));
+            }
+            Err(err) => {
+                let _ = tx.send(ModelFetchEvent::Error(err.to_string()));
+            }
+        }
+    });
+
+    app.model_fetch = Some(InFlightModelFetch {
+        receiver: rx,
+        handle,
+    });
+}
+
+fn cancel_model_fetch(app: &mut AppState) {
+    if let Some(fetch) = app.model_fetch.take() {
+        fetch.handle.abort();
+    }
+    app.model_loading = false;
+}
+
+fn apply_selected_model(app: &mut AppState) {
+    if app.model_loading {
+        app.status_message = "Still loading models...".to_string();
+        return;
+    }
+
+    let Some(selected) = app.model_options.get(app.model_selected_index).cloned() else {
+        app.status_message = "No model selected.".to_string();
+        return;
+    };
+
+    app.model = selected.clone();
+    app.mode = InputMode::Normal;
+    app.status_message = format!("Active model set to {selected}");
+}
+
 fn transcript_rows(messages: &[ChatMessage]) -> Vec<String> {
     if messages.is_empty() {
         return vec!["No messages yet. Press i, type, then Enter.".to_string()];
@@ -1189,6 +1363,43 @@ async fn stream_ollama_chat(
     Ok(())
 }
 
+async fn fetch_ollama_models(host: &str) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct OllamaModel {
+        name: String,
+    }
+
+    #[derive(Deserialize)]
+    struct OllamaTagsResponse {
+        models: Vec<OllamaModel>,
+    }
+
+    let url = format!("{}/api/tags", host.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| anyhow!("HTTP send error for model discovery: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "Model discovery returned {}: {}",
+            resp.status(),
+            resp.text()
+                .await
+                .unwrap_or_else(|_| "<no body>".to_string())
+        ));
+    }
+
+    let parsed: OllamaTagsResponse = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("Failed to parse model discovery JSON: {e}"))?;
+
+    Ok(parsed.models.into_iter().map(|model| model.name).collect())
+}
+
 fn parse_and_emit_line(line: &str, tx: &mpsc::UnboundedSender<StreamEvent>) -> Result<()> {
     let parsed: OllamaChatChunk =
         serde_json::from_str(line).map_err(|e| anyhow!("Failed to parse stream JSON: {e}"))?;
@@ -1311,13 +1522,17 @@ fn run_palette_command(app: &mut AppState) -> bool {
             open_delete_confirmation_for_active_session(app);
             false
         }
+        "models" => {
+            open_model_picker(app);
+            false
+        }
         "model" => {
             app.status_message = format!("Active model: {}", app.model);
             false
         }
         "help" => {
             app.status_message =
-                "Commands: :help :new :rename [title] :delete :model :quit".to_string();
+                "Commands: :help :new :rename [title] :delete :model :models :quit".to_string();
             false
         }
         _ => {
@@ -1472,6 +1687,7 @@ mod tests {
             app.command_input = ":help".to_string();
             assert!(!run_palette_command(&mut app));
             assert!(!app.status_message.contains(":archive"));
+            assert!(app.status_message.contains(":models"));
         }
 
         let _ = fs::remove_file(&db_path);

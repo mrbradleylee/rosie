@@ -16,6 +16,7 @@
 - Added TUI session management commands in `:` palette: `:rename [title]` and `:delete`
 - Added session delete confirmation modal (`[Y/n]`, default yes on Enter) used by both `:delete` and sessions-pane `dd`
 - Added TUI unit tests covering SQLite session persistence across restart, session switching, and confirmed session deletion flows (`dd` and `:delete`)
+- Added `:models` TUI command with a floating model picker that loads available models from Ollama `/api/tags` and applies selection to the active session model
 
 ### Changed
 
@@ -33,6 +34,7 @@
 - Updated README to document TUI session persistence, pane focus/session switching controls, and session-management palette commands
 - Updated TUI normal-mode help text to include `dd` for deleting the selected session
 - Updated man page (`rosie.1`) to reflect current TUI behavior, delete confirmation flow, and session DB file locations
+- Updated README and man page to document `:models` usage and model-picker controls
 
 ### Removed
 
