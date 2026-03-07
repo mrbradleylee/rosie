@@ -834,13 +834,11 @@ fn run_loop(
                     .fg(status_mode_color(app.mode, theme))
                     .add_modifier(Modifier::BOLD),
             )];
-            footer_spans.extend(footer_help_spans(&compact_help, theme));
+            footer_spans.push(Span::styled(compact_help, Style::default().fg(theme.text)));
             footer_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
             footer_spans.push(Span::styled(
                 status_text.clone(),
-                Style::default()
-                    .fg(status_color(&status_text, theme))
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.text),
             ));
             let footer = Paragraph::new(Line::from(footer_spans))
                 .style(Style::default().bg(theme.highlight_mid).fg(theme.text));
@@ -2936,21 +2934,6 @@ fn transcript_lines(
         assistant_markers,
     }
 }
-fn status_color(message: &str, theme: ThemePalette) -> Color {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("error") || lower.contains("failed") {
-        theme.error
-    } else if lower.contains("streaming") || lower.contains("loading") {
-        theme.info
-    } else if lower.contains("loaded") || lower.contains("saved") {
-        theme.success
-    } else if lower.contains("cancel") || lower.contains("delete") || lower.contains("warning") {
-        theme.warn
-    } else {
-        theme.muted
-    }
-}
-
 fn syntax_assets() -> &'static (SyntaxSet, ThemeSet) {
     static ASSETS: OnceLock<(SyntaxSet, ThemeSet)> = OnceLock::new();
     ASSETS.get_or_init(|| {
@@ -3031,71 +3014,6 @@ fn compact_footer_help(mode: InputMode, is_busy: bool) -> String {
         InputMode::ThemeSelect => "j/k move | Enter select".to_string(),
         InputMode::Help => "Esc/q/? close".to_string(),
     }
-}
-
-fn footer_help_spans(help: &str, theme: ThemePalette) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let mut first = true;
-    for segment in help.split(" | ") {
-        if !first {
-            spans.push(Span::styled(
-                " | ".to_string(),
-                Style::default().fg(theme.title_meta),
-            ));
-        }
-        first = false;
-        spans.extend(footer_segment_spans(segment, theme));
-    }
-    spans
-}
-
-fn footer_segment_spans(segment: &str, theme: ThemePalette) -> Vec<Span<'static>> {
-    let trimmed = segment.trim();
-    if trimmed.is_empty() {
-        return vec![Span::raw("")];
-    }
-    let Some((keys, desc)) = trimmed.split_once(' ') else {
-        return vec![Span::styled(
-            trimmed.to_string(),
-            Style::default()
-                .fg(theme.title_value_alt)
-                .add_modifier(Modifier::BOLD),
-        )];
-    };
-
-    let key_style = Style::default()
-        .fg(theme.title_value_alt)
-        .add_modifier(Modifier::BOLD);
-    let desc_color = footer_desc_color(desc, theme);
-    vec![
-        Span::styled(keys.to_string(), key_style),
-        Span::styled(format!(" {desc}"), Style::default().fg(desc_color)),
-    ]
-}
-
-fn footer_desc_color(desc: &str, theme: ThemePalette) -> Color {
-    let lower = desc.to_ascii_lowercase();
-    if lower.contains("delete") || lower.contains("failed") {
-        return theme.error;
-    }
-    if lower.contains("cancel") || lower.contains("quit") || lower.contains("close") {
-        return theme.warn;
-    }
-    if lower.contains("new")
-        || lower.contains("save")
-        || lower.contains("run")
-        || lower.contains("send")
-        || lower.contains("switch")
-        || lower.contains("select")
-        || lower.contains("apply")
-        || lower.contains("compose")
-        || lower.contains("jump")
-        || lower.contains("help")
-        || lower.contains("cmd")
-    {
-        return theme.success;
-    }
-    theme.title_label
 }
 
 fn transcript_position_label(scroll: u16, max_scroll: u16) -> String {
