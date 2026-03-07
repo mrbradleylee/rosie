@@ -75,9 +75,11 @@ In `--ask` mode, Rosie prints the model response once and exits.
 In the default TUI scaffold:
 - `Normal` mode starts by default
 - press `i` to enter `Insert` mode
-- in `Insert`, type in the composer, use `Backspace` to edit, and press `Enter` to append a local transcript message
+- in `Insert`, type in the composer, use `Backspace` to edit, and press `Enter` to send to Ollama
 - press `Esc` to return to `Normal`
-- press `:` in `Normal` to open the floating command panel, then run commands like `:quit`
+- assistant responses are appended to transcript when the request completes
+- press `:` in `Normal` to open the floating command panel, then run commands like `:help`, `:new`, `:model`, and `:quit`
+- press `Esc` in `Normal` to cancel an in-flight request
 - `Ctrl+C` quits from any mode
 
 ## Configuration

@@ -7,8 +7,9 @@
 - Added `--ask` / `-a` one-shot chat mode and `--cmd` / `-c` command-generation mode as explicit, mutually exclusive runtime modes
 - Added mode-specific config keys `ask_model` and `cmd_model`, plus `execution_enabled` for `--cmd` execute control
 - Added default no-flag runtime path that launches a minimal TUI shell scaffold
-- Added local-only composer/transcript interaction in the TUI scaffold with explicit `Normal`/`Insert` modes, `i` to enter input, and `Esc` to return to normal
-- Added floating `:` command panel in the TUI scaffold with initial command handling (`:quit`)
+- Added TUI modal interaction with explicit `Normal`/`Insert` modes (`i` to enter input, `Esc` to return to normal)
+- Added floating `:` command panel in the TUI scaffold with initial commands (`:help`, `:new`, `:model`, `:quit`)
+- Added Ollama-backed TUI chat requests from composer input (`Enter` in `Insert`), with assistant replies appended to transcript
 
 ### Changed
 
@@ -18,6 +19,7 @@
 - Updated `--configure` to prompt for Ollama host and model defaults (`default_model`, `ask_model`, `cmd_model`)
 - Updated README and man page to document `--ask`/`--cmd`, TUI-default entrypoint behavior, and config-only model/host resolution
 - Updated `--configure` model prompts so numeric model selection works consistently for default, ask, and cmd model choices, with explicit confirm/reselect after resolving each choice
+- Updated TUI key behavior so `Esc` in `Normal` cancels in-flight requests and `Ctrl+C` quits from any mode
 
 ### Removed
 

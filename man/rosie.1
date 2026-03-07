@@ -33,9 +33,9 @@ mode. Press
 .B i
 to enter
 .B Insert
-mode, where composer input is local-only;
+mode; pressing
 .B Enter
-appends it to transcript and
+sends the composer content to Ollama, and the assistant response is appended to transcript when complete.
 .B Backspace
 edits input. Press
 .B Esc
@@ -46,8 +46,16 @@ mode. Press
 in
 .B Normal
 to open the floating command panel (for example,
+.B :help ,
+.B :new ,
+.B :model ,
+or
 .B :quit
-). Use
+). Press
+.B Esc
+in
+.B Normal
+to cancel an in-flight request. Use
 .B Ctrl+C
 to quit from any mode.
 .PP

@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
     let runtime_model = args.model.clone();
 
     if !args.ask_mode && !args.cmd_mode {
-        launch_tui(args.model.as_deref())?;
+        launch_tui(args.model.as_deref()).await?;
         return Ok(());
     }
 
@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
     }
 }
 
-fn launch_tui(runtime_model: Option<&str>) -> Result<()> {
+async fn launch_tui(runtime_model: Option<&str>) -> Result<()> {
     let config = load_config()?;
     let host = config
         .ollama_host
@@ -129,8 +129,15 @@ fn launch_tui(runtime_model: Option<&str>) -> Result<()> {
         .to_string();
     let model = runtime_model
         .map(str::to_owned)
-        .or_else(|| config.effective_default_model())
-        .unwrap_or_else(|| "(auto from Ollama /api/tags)".to_string());
+        .or_else(|| config.effective_default_model());
+    let model = match model {
+        Some(value) => value,
+        None => discover_ollama_models(&host)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("No Ollama models found. Run `ollama pull <model>` and retry."))?,
+    };
 
     tui::run(&host, &model)?;
     Ok(())

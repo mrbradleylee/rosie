@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -10,8 +10,11 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 pub fn run(host: &str, model: &str) -> Result<()> {
     enable_raw_mode()?;
@@ -28,21 +31,31 @@ pub fn run(host: &str, model: &str) -> Result<()> {
 
 struct AppState {
     mode: InputMode,
+    host: String,
+    model: String,
     composer_input: String,
     command_input: String,
-    transcript: Vec<String>,
+    messages: Vec<ChatMessage>,
+    in_flight: Option<InFlightRequest>,
     status_message: String,
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(host: &str, model: &str) -> Self {
         Self {
             mode: InputMode::Normal,
+            host: host.to_string(),
+            model: model.to_string(),
             composer_input: String::new(),
             command_input: String::new(),
-            transcript: Vec::new(),
+            messages: Vec::new(),
+            in_flight: None,
             status_message: "Normal mode. Press i to enter Insert mode.".to_string(),
         }
+    }
+
+    fn is_busy(&self) -> bool {
+        self.in_flight.is_some()
     }
 }
 
@@ -53,14 +66,33 @@ enum InputMode {
     CommandPalette,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+enum StreamEvent {
+    Response(String),
+    Done,
+    Error(String),
+}
+
+struct InFlightRequest {
+    receiver: mpsc::UnboundedReceiver<StreamEvent>,
+    handle: JoinHandle<()>,
+}
+
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     host: &str,
     model: &str,
 ) -> Result<()> {
-    let mut app = AppState::new();
+    let mut app = AppState::new(host, model);
 
     loop {
+        process_stream_events(&mut app);
+
         terminal.draw(|frame| {
             let root = Layout::default()
                 .direction(Direction::Vertical)
@@ -77,10 +109,14 @@ fn run_loop(
                 InputMode::Insert => "INSERT",
                 InputMode::CommandPalette => "COMMAND",
             };
-            let header =
-                Paragraph::new(format!("Rosie TUI | Mode: {mode_label} | Host: {host} | Model: {model}"))
-                .block(Block::default().borders(Borders::ALL).title("Status"))
-                .style(Style::default().add_modifier(Modifier::BOLD));
+            let header = Paragraph::new(format!(
+                "Rosie TUI | Mode: {mode_label} | Host: {} | Model: {}{}",
+                app.host,
+                app.model,
+                if app.is_busy() { " | Request in flight..." } else { "" }
+            ))
+            .block(Block::default().borders(Borders::ALL).title("Status"))
+            .style(Style::default().add_modifier(Modifier::BOLD));
             frame.render_widget(header, root[0]);
 
             let body = Layout::default()
@@ -92,12 +128,19 @@ fn run_loop(
                 .block(Block::default().borders(Borders::ALL).title("Sessions"));
             frame.render_widget(sessions, body[0]);
 
-            let transcript_lines: Vec<Line<'_>> = if app.transcript.is_empty() {
-                vec![Line::from("No messages yet. Type in Composer and press Enter.")]
+            let transcript_lines: Vec<Line<'_>> = if app.messages.is_empty() {
+                vec![Line::from("No messages yet. Press i, type, then Enter.")]
             } else {
-                app.transcript
+                app.messages
                     .iter()
-                    .map(|entry| Line::from(entry.as_str()))
+                    .map(|entry| {
+                        let label = match entry.role.as_str() {
+                            "user" => "You",
+                            "assistant" => "Assistant",
+                            _ => "System",
+                        };
+                        Line::from(format!("{label}: {}", entry.content))
+                    })
                     .collect()
             };
             let transcript = Paragraph::new(transcript_lines)
@@ -109,7 +152,13 @@ fn run_loop(
             frame.render_widget(composer, root[2]);
 
             let footer_help = match app.mode {
-                InputMode::Normal => "i: insert | : command palette | Ctrl+C: quit",
+                InputMode::Normal => {
+                    if app.is_busy() {
+                        "i: insert (disabled) | : command palette | Esc: cancel request | Ctrl+C: quit"
+                    } else {
+                        "i: insert | : command palette | Ctrl+C: quit"
+                    }
+                }
                 InputMode::Insert => "Enter: send | Backspace: edit | Esc: normal",
                 InputMode::CommandPalette => "Type command | Enter: run | Esc: cancel",
             };
@@ -132,19 +181,30 @@ fn run_loop(
             && key.kind == KeyEventKind::Press
         {
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                cancel_request(&mut app, true);
                 break;
             }
 
             match app.mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('i') => {
-                        app.mode = InputMode::Insert;
-                        app.status_message = "Insert mode.".to_string();
+                        if app.is_busy() {
+                            app.status_message =
+                                "Wait for request to finish or press Esc to cancel.".to_string();
+                        } else {
+                            app.mode = InputMode::Insert;
+                            app.status_message = "Insert mode.".to_string();
+                        }
                     }
                     KeyCode::Char(':') => {
                         app.mode = InputMode::CommandPalette;
                         app.command_input.clear();
                         app.status_message = "Command palette open.".to_string();
+                    }
+                    KeyCode::Esc => {
+                        if app.is_busy() {
+                            cancel_request(&mut app, false);
+                        }
                     }
                     _ => {}
                 },
@@ -154,12 +214,7 @@ fn run_loop(
                         app.status_message = "Normal mode.".to_string();
                     }
                     KeyCode::Enter => {
-                        let trimmed = app.composer_input.trim();
-                        if !trimmed.is_empty() {
-                            app.transcript.push(format!("You: {trimmed}"));
-                            app.composer_input.clear();
-                            app.status_message = "Message added locally.".to_string();
-                        }
+                        submit_composer_message(&mut app);
                     }
                     KeyCode::Backspace => {
                         app.composer_input.pop();
@@ -177,6 +232,7 @@ fn run_loop(
                     }
                     KeyCode::Enter => {
                         if run_palette_command(&mut app) {
+                            cancel_request(&mut app, true);
                             break;
                         }
                     }
@@ -192,6 +248,173 @@ fn run_loop(
         }
     }
 
+    Ok(())
+}
+
+fn submit_composer_message(app: &mut AppState) {
+    if app.is_busy() {
+        app.status_message = "A response is already in progress.".to_string();
+        return;
+    }
+
+    let trimmed = app.composer_input.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let user_content = trimmed.to_string();
+    app.messages.push(ChatMessage {
+        role: "user".to_string(),
+        content: user_content,
+    });
+    app.composer_input.clear();
+
+    let request_messages = app.messages.clone();
+    app.messages.push(ChatMessage {
+        role: "assistant".to_string(),
+        content: String::new(),
+    });
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let host = app.host.clone();
+    let model = app.model.clone();
+
+    let handle = tokio::spawn(async move {
+        if let Err(err) = request_ollama_chat(&host, &model, request_messages, tx.clone()).await {
+            let _ = tx.send(StreamEvent::Error(err.to_string()));
+        }
+    });
+
+    app.in_flight = Some(InFlightRequest {
+        receiver: rx,
+        handle,
+    });
+    app.mode = InputMode::Normal;
+    app.status_message = "Sending request to Ollama...".to_string();
+}
+
+fn process_stream_events(app: &mut AppState) {
+    let Some(in_flight) = app.in_flight.as_mut() else {
+        return;
+    };
+
+    let mut done = false;
+    loop {
+        match in_flight.receiver.try_recv() {
+            Ok(StreamEvent::Response(content)) => {
+                if let Some(last) = app.messages.last_mut() {
+                    if last.role == "assistant" {
+                        last.content = content;
+                    }
+                }
+                app.status_message = "Response received.".to_string();
+            }
+            Ok(StreamEvent::Done) => {
+                done = true;
+                break;
+            }
+            Ok(StreamEvent::Error(message)) => {
+                if let Some(last) = app.messages.last_mut() {
+                    if last.role == "assistant" && last.content.trim().is_empty() {
+                        last.content = format!("[error] {message}");
+                    }
+                }
+                app.status_message = format!("Request error: {message}");
+                done = true;
+                break;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                done = true;
+                break;
+            }
+        }
+    }
+
+    if done {
+        app.in_flight = None;
+    }
+}
+
+fn cancel_request(app: &mut AppState, silent: bool) {
+    if let Some(in_flight) = app.in_flight.take() {
+        in_flight.handle.abort();
+        if let Some(last) = app.messages.last_mut() {
+            if last.role == "assistant" && last.content.trim().is_empty() {
+                last.content = "[cancelled]".to_string();
+            }
+        }
+        if !silent {
+            app.status_message = "Request cancelled.".to_string();
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct OllamaChatRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    stream: bool,
+}
+
+#[derive(Deserialize)]
+struct OllamaChatResponse {
+    message: Option<OllamaChatMessage>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OllamaChatMessage {
+    content: Option<String>,
+}
+
+async fn request_ollama_chat(
+    host: &str,
+    model: &str,
+    messages: Vec<ChatMessage>,
+    tx: mpsc::UnboundedSender<StreamEvent>,
+) -> Result<()> {
+    let url = format!("{}/api/chat", host.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let request = OllamaChatRequest {
+        model: model.to_string(),
+        messages,
+        stream: false,
+    };
+
+    let resp = client
+        .post(url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| anyhow!("HTTP send error: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "Ollama returned {}: {}",
+            resp.status(),
+            resp.text().await.unwrap_or_else(|_| "<no body>".to_string())
+        ));
+    }
+
+    let parsed: OllamaChatResponse = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("Failed to parse Ollama response JSON: {e}"))?;
+
+    if let Some(error) = parsed.error {
+        return Err(anyhow!(error));
+    }
+
+    let content = parsed
+        .message
+        .and_then(|message| message.content)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| anyhow!("Ollama returned no assistant content"))?;
+
+    let _ = tx.send(StreamEvent::Response(content));
+    let _ = tx.send(StreamEvent::Done);
     Ok(())
 }
 
@@ -240,11 +463,23 @@ fn run_palette_command(app: &mut AppState) -> bool {
         }
         "quit" | "q" => true,
         "new" => {
-            app.status_message = "Command :new not implemented yet.".to_string();
+            if app.is_busy() {
+                app.status_message =
+                    "Cannot reset while request is in progress. Press Esc to cancel first."
+                        .to_string();
+            } else {
+                app.messages.clear();
+                app.composer_input.clear();
+                app.status_message = "Started new local conversation.".to_string();
+            }
             false
         }
         "model" => {
-            app.status_message = "Command :model not implemented yet.".to_string();
+            app.status_message = format!("Active model: {}", app.model);
+            false
+        }
+        "help" => {
+            app.status_message = "Commands: :help :new :model :quit".to_string();
             false
         }
         _ => {
