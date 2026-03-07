@@ -8,6 +8,9 @@ text = "#575279"
 text_muted = "#797593"
 border = "#dfdad9"
 border_active = "#cecacd"
+title_label = "#575279"
+title_value = "#907aa9"
+title_meta = "#797593"
 
 [state]
 accent = "#907aa9"

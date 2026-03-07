@@ -90,7 +90,8 @@ In the default TUI:
   - `:help`
   - `:session` (open session manager modal)
   - `:models` (open model picker from Ollama `/api/tags` for the active session)
-  - `:theme <name>` (set TUI theme)
+  - `:theme` (open picker from config dir themes)
+  - `:theme <name>` (set TUI theme directly)
   - `:quit`
 - in the `:` command panel, use `j`/`k` (or arrows) to select from the command picklist and `Enter` to run
 - in session manager, use `j`/`k` to select and `Enter` switch, `n` new, `r` rename, `d` delete (with confirmation), `Esc` close
@@ -127,7 +128,7 @@ That command creates/updates config and prompts for:
 - `execution_enabled` (controls whether execute is allowed in `--cmd`)
 
 Theme is controlled in TUI with `:theme` and persisted into config as `theme`.
-`theme` accepts a packaged theme name from the repo `themes/` directory (discoverable with `:theme`) or a user file theme name loaded from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`).
+`theme` accepts a packaged theme name from the repo `themes/` directory or a user file theme name loaded from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`).
 Packaged defaults include Rose Pine variants (`rose-pine`, `rose-pine-moon`, `rose-pine-dawn`).
 
 Example config:
@@ -154,6 +155,9 @@ text = "#e0def4"
 text_muted = "#908caa"
 border = "#403d52"
 border_active = "#524f67"
+title_label = "#e0def4"
+title_value = "#c4a7e7"
+title_meta = "#908caa"
 
 [state]
 accent = "#c4a7e7"

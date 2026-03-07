@@ -16,6 +16,11 @@
 - Added file-backed theme loading from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`) using a documented color schema
 - Updated file theme schema to prefer semantic `[ui]` + `[state]` sections, with legacy `[colors]` still supported for compatibility
 - Switched default theme sourcing to packaged repo theme files (`themes/*.toml`) and added Rose Pine variants (`rose-pine`, `rose-pine-moon`, `rose-pine-dawn`)
+- Updated `:theme` with no arguments to open a picker modal sourced from config-dir themes (parallel to `:models`)
+- Removed theme name from the status bar title
+- Increased TUI visual contrast by applying `[highlight]`/`[syntax]` theme colors to panel separation and transcript role styling
+- Updated pane titles to use explicit semantic title/value colors (e.g., transcript session title and composer model) for improved contrast on dark and light themes
+- Added `ui.title_label`, `ui.title_value`, and `ui.title_meta` theme tokens so pane/title colors are sourced from theme files rather than fixed mappings
 
 ## 0.7.0
 

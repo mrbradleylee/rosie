@@ -24,6 +24,15 @@ pub fn default_theme() -> ResolvedTheme {
                 error: Color::Rgb(235, 111, 146),
                 border: Color::Rgb(64, 61, 82),
                 border_active: Color::Rgb(82, 79, 103),
+                user: Color::Rgb(196, 167, 231),
+                assistant: Color::Rgb(224, 222, 244),
+                system: Color::Rgb(144, 140, 170),
+                highlight_low: Color::Rgb(33, 32, 46),
+                highlight_mid: Color::Rgb(64, 61, 82),
+                highlight_high: Color::Rgb(82, 79, 103),
+                title_label: Color::Rgb(224, 222, 244),
+                title_value: Color::Rgb(196, 167, 231),
+                title_meta: Color::Rgb(144, 140, 170),
             },
         },
     }
@@ -42,6 +51,15 @@ pub struct ThemePalette {
     pub error: Color,
     pub border: Color,
     pub border_active: Color,
+    pub user: Color,
+    pub assistant: Color,
+    pub system: Color,
+    pub highlight_low: Color,
+    pub highlight_mid: Color,
+    pub highlight_high: Color,
+    pub title_label: Color,
+    pub title_value: Color,
+    pub title_meta: Color,
 }
 
 pub struct ResolvedTheme {
@@ -71,6 +89,9 @@ struct ThemeFileUi {
     text_muted: String,
     border: String,
     border_active: String,
+    title_label: Option<String>,
+    title_value: Option<String>,
+    title_meta: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -129,34 +150,128 @@ pub fn resolve_theme(theme_name: &str, config_dir: &Path) -> Result<ResolvedThem
 
 fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
     if let (Some(ui), Some(state)) = (&file.ui, &file.state) {
+        let base = parse_hex_color(&ui.bg)?;
+        let surface = parse_hex_color(&ui.panel)?;
+        let surface_alt = parse_hex_color(&ui.panel_alt)?;
+        let text = parse_hex_color(&ui.text)?;
+        let muted = parse_hex_color(&ui.text_muted)?;
+        let accent = parse_hex_color(&state.accent)?;
+        let success = parse_hex_color(&state.success)?;
+        let warn = parse_hex_color(&state.warning)?;
+        let error = parse_hex_color(&state.error)?;
+        let border = parse_hex_color(&ui.border)?;
+        let border_active = parse_hex_color(&ui.border_active)?;
+        let user = file
+            .syntax
+            .as_ref()
+            .map(|syntax| parse_hex_color(&syntax.user))
+            .transpose()?
+            .unwrap_or(accent);
+        let assistant = file
+            .syntax
+            .as_ref()
+            .map(|syntax| parse_hex_color(&syntax.assistant))
+            .transpose()?
+            .unwrap_or(text);
+        let system = file
+            .syntax
+            .as_ref()
+            .map(|syntax| parse_hex_color(&syntax.system))
+            .transpose()?
+            .unwrap_or(muted);
+        let highlight_low = file
+            .highlight
+            .as_ref()
+            .map(|highlight| parse_hex_color(&highlight.low))
+            .transpose()?
+            .unwrap_or(base);
+        let highlight_mid = file
+            .highlight
+            .as_ref()
+            .map(|highlight| parse_hex_color(&highlight.mid))
+            .transpose()?
+            .unwrap_or(border);
+        let highlight_high = file
+            .highlight
+            .as_ref()
+            .map(|highlight| parse_hex_color(&highlight.high))
+            .transpose()?
+            .unwrap_or(border_active);
+        let title_label = ui
+            .title_label
+            .as_deref()
+            .map(parse_hex_color)
+            .transpose()?
+            .unwrap_or(text);
+        let title_value = ui
+            .title_value
+            .as_deref()
+            .map(parse_hex_color)
+            .transpose()?
+            .unwrap_or(accent);
+        let title_meta = ui
+            .title_meta
+            .as_deref()
+            .map(parse_hex_color)
+            .transpose()?
+            .unwrap_or(muted);
         return Ok(ThemePalette {
-            base: parse_hex_color(&ui.bg)?,
-            surface: parse_hex_color(&ui.panel)?,
-            surface_alt: parse_hex_color(&ui.panel_alt)?,
-            text: parse_hex_color(&ui.text)?,
-            muted: parse_hex_color(&ui.text_muted)?,
-            accent: parse_hex_color(&state.accent)?,
-            success: parse_hex_color(&state.success)?,
-            warn: parse_hex_color(&state.warning)?,
-            error: parse_hex_color(&state.error)?,
-            border: parse_hex_color(&ui.border)?,
-            border_active: parse_hex_color(&ui.border_active)?,
+            base,
+            surface,
+            surface_alt,
+            text,
+            muted,
+            accent,
+            success,
+            warn,
+            error,
+            border,
+            border_active,
+            user,
+            assistant,
+            system,
+            highlight_low,
+            highlight_mid,
+            highlight_high,
+            title_label,
+            title_value,
+            title_meta,
         });
     }
 
     if let Some(colors) = &file.colors {
+        let base = parse_hex_color(&colors.base)?;
+        let surface = parse_hex_color(&colors.surface)?;
+        let surface_alt = parse_hex_color(&colors.surface_alt)?;
+        let text = parse_hex_color(&colors.text)?;
+        let muted = parse_hex_color(&colors.muted)?;
+        let accent = parse_hex_color(&colors.accent)?;
+        let success = parse_hex_color(&colors.success)?;
+        let warn = parse_hex_color(&colors.warn)?;
+        let error = parse_hex_color(&colors.error)?;
+        let border = parse_hex_color(&colors.border)?;
+        let border_active = parse_hex_color(&colors.border_active)?;
         return Ok(ThemePalette {
-            base: parse_hex_color(&colors.base)?,
-            surface: parse_hex_color(&colors.surface)?,
-            surface_alt: parse_hex_color(&colors.surface_alt)?,
-            text: parse_hex_color(&colors.text)?,
-            muted: parse_hex_color(&colors.muted)?,
-            accent: parse_hex_color(&colors.accent)?,
-            success: parse_hex_color(&colors.success)?,
-            warn: parse_hex_color(&colors.warn)?,
-            error: parse_hex_color(&colors.error)?,
-            border: parse_hex_color(&colors.border)?,
-            border_active: parse_hex_color(&colors.border_active)?,
+            base,
+            surface,
+            surface_alt,
+            text,
+            muted,
+            accent,
+            success,
+            warn,
+            error,
+            border,
+            border_active,
+            user: accent,
+            assistant: text,
+            system: muted,
+            highlight_low: base,
+            highlight_mid: border,
+            highlight_high: border_active,
+            title_label: text,
+            title_value: accent,
+            title_meta: muted,
         });
     }
 
@@ -166,10 +281,8 @@ fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
     ))
 }
 
-pub fn discover_theme_names(config_dir: &Path) -> Vec<String> {
-    let mut names = Vec::new();
-    names.extend(discover_file_theme_names_in_dir(&packaged_theme_dir()));
-    names.extend(discover_file_theme_names_in_dir(&config_dir.join("themes")));
+pub fn discover_config_theme_names(config_dir: &Path) -> Vec<String> {
+    let mut names = discover_file_theme_names_in_dir(&config_dir.join("themes"));
     names.sort();
     names.dedup();
     names

@@ -1,6 +1,4 @@
-use crate::theme::{
-    ThemePalette, config_dir_from_env, default_theme, discover_theme_names, resolve_theme,
-};
+use crate::theme::{ThemePalette, config_dir_from_env, discover_config_theme_names, resolve_theme};
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -11,7 +9,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -71,6 +69,8 @@ struct AppState {
     model_selected_index: usize,
     model_loading: bool,
     model_error: Option<String>,
+    theme_options: Vec<String>,
+    theme_selected_index: usize,
     pending_delete_session_id: Option<i64>,
     delete_return_to_session_manager: bool,
     session_rename_input: String,
@@ -119,6 +119,8 @@ impl AppState {
             model_selected_index: 0,
             model_loading: false,
             model_error: None,
+            theme_options: Vec::new(),
+            theme_selected_index: 0,
             pending_delete_session_id: None,
             delete_return_to_session_manager: false,
             session_rename_input: String::new(),
@@ -145,6 +147,7 @@ enum InputMode {
     SessionRename,
     ConfirmDelete,
     ModelSelect,
+    ThemeSelect,
     Help,
 }
 
@@ -469,6 +472,7 @@ fn run_loop(
                 InputMode::SessionRename => "RENAME",
                 InputMode::ConfirmDelete => "CONFIRM",
                 InputMode::ModelSelect => "MODELS",
+                InputMode::ThemeSelect => "THEMES",
                 InputMode::Help => "HELP",
             };
             let active_title = active_session_title(&app);
@@ -481,9 +485,14 @@ fn run_loop(
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!("Status | Theme: {}", app.theme_key))
+                    .title(Line::from(vec![Span::styled(
+                        "Status",
+                        Style::default()
+                            .fg(theme.title_label)
+                            .add_modifier(Modifier::BOLD),
+                    )]))
                     .style(Style::default().bg(theme.surface).fg(theme.text))
-                    .border_style(Style::default().fg(theme.border_active)),
+                    .border_style(Style::default().fg(theme.highlight_high)),
             )
             .style(
                 Style::default()
@@ -499,29 +508,37 @@ fn run_loop(
             });
             app.transcript_view_width = transcript_inner.width.max(1) as usize;
             app.transcript_view_height = transcript_inner.height.max(1) as usize;
-            let transcript_rows = transcript_rows(&app.messages, app.is_busy());
-            let transcript_lines: Vec<Line<'_>> = transcript_rows
-                .iter()
-                .map(|row| Line::from(row.as_str()))
-                .collect();
-            let transcript_title = if app.is_busy() {
-                format!("Transcript | {active_title} | Streaming...")
-            } else {
-                format!("Transcript | {active_title}")
-            };
+            let transcript_lines = transcript_lines(&app.messages, app.is_busy(), theme);
+            let mut transcript_title_spans = vec![
+                Span::styled(
+                    "Transcript",
+                    Style::default()
+                        .fg(theme.title_label)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                Span::styled(active_title, Style::default().fg(theme.title_value)),
+            ];
+            if app.is_busy() {
+                transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
+                transcript_title_spans.push(Span::styled(
+                    "Streaming...",
+                    Style::default().fg(theme.success),
+                ));
+            }
             let transcript_base = Paragraph::new(transcript_lines)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(transcript_title)
-                        .style(Style::default().bg(theme.base).fg(theme.text))
+                        .title(Line::from(transcript_title_spans))
+                        .style(Style::default().bg(theme.highlight_low).fg(theme.text))
                         .border_style(Style::default().fg(if transcript_active {
                             theme.border_active
                         } else {
                             theme.border
                         })),
                 )
-                .style(Style::default().bg(theme.base).fg(theme.text))
+                .style(Style::default().bg(theme.highlight_low).fg(theme.text))
                 .wrap(Wrap { trim: false });
             let total_lines = transcript_base.line_count(app.transcript_view_width as u16);
             let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
@@ -534,12 +551,22 @@ fn run_loop(
             let transcript = transcript_base.scroll((app.transcript_scroll, 0));
             frame.render_widget(transcript, root[1]);
 
-            let composer_title = format!("Composer | Model: {}", app.model);
             let composer = Paragraph::new(app.composer_input.as_str())
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(composer_title)
+                        .title(Line::from(vec![
+                            Span::styled(
+                                "Composer",
+                                Style::default()
+                                    .fg(theme.title_label)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                            Span::styled("Model:", Style::default().fg(theme.title_meta)),
+                            Span::styled(" ", Style::default().fg(theme.title_meta)),
+                            Span::styled(app.model.clone(), Style::default().fg(theme.title_value)),
+                        ]))
                         .style(Style::default().bg(theme.surface_alt).fg(theme.text))
                         .border_style(Style::default().fg(if composer_active {
                             theme.accent
@@ -577,12 +604,13 @@ fn run_loop(
                 InputMode::SessionRename => "Type title | Enter save | Esc cancel",
                 InputMode::ConfirmDelete => "Confirm delete: Enter/y=yes, n/Esc=no",
                 InputMode::ModelSelect => "Model picker: j/k move | Enter select | Esc cancel",
+                InputMode::ThemeSelect => "Theme picker: j/k move | Enter select | Esc cancel",
                 InputMode::Help => "Help: Esc/q/? close",
             };
             let footer = Paragraph::new(format!("{} | {}", footer_help, app.status_message))
                 .style(
                     Style::default()
-                        .bg(theme.surface)
+                        .bg(theme.highlight_mid)
                         .fg(status_color(&app.status_message, theme))
                         .add_modifier(Modifier::DIM),
                 );
@@ -697,6 +725,39 @@ fn run_loop(
                         Block::default()
                             .borders(Borders::ALL)
                             .title("Models")
+                            .style(Style::default().bg(theme.surface).fg(theme.text))
+                            .border_style(Style::default().fg(theme.accent)),
+                    )
+                    .style(Style::default().bg(theme.surface).fg(theme.text))
+                    .alignment(Alignment::Left)
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(Clear, popup);
+                frame.render_widget(picker, popup);
+            } else if app.mode == InputMode::ThemeSelect {
+                let popup = centered_rect(70, 12, frame.area());
+                let mut rows = Vec::new();
+                if app.theme_options.is_empty() {
+                    rows.push("No themes found in config/themes".to_string());
+                    rows.push("Add *.toml files under ~/.config/rosie/themes".to_string());
+                } else {
+                    rows.push("Select a theme (Enter to apply):".to_string());
+                    rows.push(String::new());
+                    for (idx, theme_name) in app.theme_options.iter().enumerate() {
+                        let marker = if idx == app.theme_selected_index {
+                            ">"
+                        } else {
+                            " "
+                        };
+                        let active = if *theme_name == app.theme_key { "*" } else { " " };
+                        rows.push(format!("{marker}{active} {theme_name}"));
+                    }
+                }
+                let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
+                let picker = Paragraph::new(lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Themes")
                             .style(Style::default().bg(theme.surface).fg(theme.text))
                             .border_style(Style::default().fg(theme.accent)),
                     )
@@ -938,6 +999,27 @@ fn run_loop(
                     }
                     KeyCode::Enter => {
                         apply_selected_model(&mut app);
+                    }
+                    _ => {}
+                },
+                InputMode::ThemeSelect => match key.code {
+                    KeyCode::Esc => {
+                        app.mode = InputMode::Normal;
+                        app.status_message = "Theme picker cancelled.".to_string();
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if !app.theme_options.is_empty() {
+                            app.theme_selected_index =
+                                (app.theme_selected_index + 1).min(app.theme_options.len() - 1);
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if !app.theme_options.is_empty() {
+                            app.theme_selected_index = app.theme_selected_index.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Enter => {
+                        apply_selected_theme(&mut app);
                     }
                     _ => {}
                 },
@@ -1817,6 +1899,29 @@ fn open_model_picker(app: &mut AppState) {
     });
 }
 
+fn open_theme_picker(app: &mut AppState) {
+    let config_dir = match config_dir_from_env() {
+        Ok(path) => path,
+        Err(err) => {
+            app.mode = InputMode::Normal;
+            app.status_message = format!("Theme picker unavailable: {err}");
+            return;
+        }
+    };
+    app.mode = InputMode::ThemeSelect;
+    app.theme_options = discover_config_theme_names(&config_dir);
+    app.theme_selected_index = app
+        .theme_options
+        .iter()
+        .position(|name| name == &app.theme_key)
+        .unwrap_or(0);
+    if app.theme_options.is_empty() {
+        app.status_message = "No themes found in config/themes.".to_string();
+    } else {
+        app.status_message = format!("Loaded {} theme(s).", app.theme_options.len());
+    }
+}
+
 fn cancel_model_fetch(app: &mut AppState) {
     if let Some(fetch) = app.model_fetch.take() {
         fetch.handle.abort();
@@ -1857,6 +1962,43 @@ fn apply_selected_model(app: &mut AppState) {
     }
 }
 
+fn apply_selected_theme(app: &mut AppState) {
+    let Some(selected) = app.theme_options.get(app.theme_selected_index).cloned() else {
+        app.status_message = "No theme selected.".to_string();
+        return;
+    };
+
+    let config_dir = match config_dir_from_env() {
+        Ok(path) => path,
+        Err(err) => {
+            app.status_message = format!("Unable to resolve theme config directory: {err}");
+            return;
+        }
+    };
+    let resolved = match resolve_theme(&selected, &config_dir) {
+        Ok(theme) => theme,
+        Err(err) => {
+            app.status_message = format!("Failed to load theme '{selected}': {err}");
+            return;
+        }
+    };
+
+    app.theme = resolved.palette;
+    app.theme_key = resolved.key.clone();
+    app.mode = InputMode::Normal;
+    match persist_theme_config(&resolved.key) {
+        Ok(()) => {
+            app.status_message = format!("Theme set to {}.", resolved.key);
+        }
+        Err(err) => {
+            app.status_message = format!(
+                "Theme set to {}, but failed to persist: {err}",
+                resolved.key
+            );
+        }
+    }
+}
+
 fn help_rows() -> Vec<String> {
     vec![
         "Navigation".to_string(),
@@ -1869,7 +2011,8 @@ fn help_rows() -> Vec<String> {
         "  i: enter insert mode, Enter: send, Esc: return to normal".to_string(),
         "".to_string(),
         "Commands".to_string(),
-        "  :session  :models  :theme <name>  :help  :quit".to_string(),
+        "  :session  :models  :theme  :help  :quit".to_string(),
+        "  :theme <name> sets directly; :theme opens picker".to_string(),
         "  ':' palette shows a picklist; use j/k (or arrows) + Enter".to_string(),
         "  :help or ? opens this panel".to_string(),
         "".to_string(),
@@ -1952,17 +2095,24 @@ fn run_palette_selected_command(app: &mut AppState) -> bool {
     run_palette_command(app)
 }
 
-fn transcript_rows(messages: &[ChatMessage], is_busy: bool) -> Vec<String> {
+fn transcript_lines(
+    messages: &[ChatMessage],
+    is_busy: bool,
+    theme: ThemePalette,
+) -> Vec<Line<'static>> {
     if messages.is_empty() {
-        return vec!["No messages yet. Press i, type, then Enter.".to_string()];
+        return vec![Line::styled(
+            "No messages yet. Press i, type, then Enter.".to_string(),
+            Style::default().fg(theme.muted),
+        )];
     }
 
     let mut rows = Vec::new();
     for (idx, message) in messages.iter().enumerate() {
-        let label = match message.role.as_str() {
-            "user" => "You",
-            "assistant" => "Assistant",
-            _ => "System",
+        let (label, label_color) = match message.role.as_str() {
+            "user" => ("You", theme.user),
+            "assistant" => ("Assistant", theme.assistant),
+            _ => ("System", theme.system),
         };
         let is_pending_assistant = is_busy
             && message.role == "assistant"
@@ -1977,14 +2127,30 @@ fn transcript_rows(messages: &[ChatMessage], is_busy: bool) -> Vec<String> {
         };
         let mut lines = content.lines();
         if let Some(first) = lines.next() {
-            rows.push(format!("{label}: {first}"));
+            rows.push(Line::from(vec![
+                Span::styled(
+                    format!("{label}:"),
+                    Style::default()
+                        .fg(label_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" {first}"), Style::default().fg(theme.text)),
+            ]));
             for line in lines {
-                rows.push(format!("  {line}"));
+                rows.push(Line::styled(
+                    format!("  {line}"),
+                    Style::default().fg(theme.text),
+                ));
             }
         } else {
-            rows.push(format!("{label}:"));
+            rows.push(Line::styled(
+                format!("{label}:"),
+                Style::default()
+                    .fg(label_color)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
-        rows.push(String::new());
+        rows.push(Line::raw(""));
     }
     rows
 }
@@ -2321,27 +2487,7 @@ fn run_palette_command(app: &mut AppState) -> bool {
 
 fn apply_theme_command(app: &mut AppState, arg: &str) {
     if arg.is_empty() {
-        let config_dir = match config_dir_from_env() {
-            Ok(path) => path,
-            Err(err) => {
-                app.status_message = format!(
-                    "Active theme: {} (failed to inspect custom themes: {err})",
-                    app.theme_key
-                );
-                return;
-            }
-        };
-        let mut options = discover_theme_names(&config_dir);
-        if options.is_empty() {
-            options.push(default_theme().key);
-        }
-        options.sort();
-        options.dedup();
-        app.status_message = format!(
-            "Active theme: {} (available: {})",
-            app.theme_key,
-            options.join(", ")
-        );
+        open_theme_picker(app);
         return;
     }
 
@@ -2412,7 +2558,7 @@ fn tui_config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::{default_theme, discover_theme_names, resolve_theme};
+    use crate::theme::{default_theme, discover_config_theme_names, resolve_theme};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2595,7 +2741,7 @@ mod tests {
     fn theme_command_switches_theme_in_memory() {
         let db_path = temp_db_path("palette-theme");
         let config_dir = config_dir_from_env().expect("config dir");
-        let names = discover_theme_names(&config_dir);
+        let names = discover_config_theme_names(&config_dir);
         let first = names.first().map(String::as_str).unwrap_or("theme-a");
         let second = names.get(1).map(String::as_str).unwrap_or(first);
 
