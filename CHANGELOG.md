@@ -30,6 +30,7 @@
 - Added a startup Landing mode with a dedicated title block, chat entry box, and quick command hints (`:session`, `:models`, `:theme`, `Ctrl+P`)
 - Updated session initialization to be lazy from Landing: Rosie now opens without creating a session until chat/model actions require one
 - Removed unused `sessions.is_archived` from the local TUI schema for new databases
+- Added first-pass fenced code block rendering in transcript with framed rails/gutter and language-aware syntax highlighting via `syntect` (with plain-style fallback)
 
 ## 0.7.0
 

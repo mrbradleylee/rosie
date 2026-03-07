@@ -18,8 +18,12 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Theme as SyntectTheme, ThemeSet};
+use syntect::parsing::SyntaxSet;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -2689,7 +2693,15 @@ fn transcript_lines(
         };
         let wrap_pad = "  ";
         let is_assistant = message.role == "assistant";
-        if message.role == "assistant" {
+        let code_style = Style::default().fg(theme.text).bg(theme.surface_alt);
+        let rail_style = Style::default()
+            .fg(theme.title_meta)
+            .bg(theme.highlight_low);
+        let gutter_style = Style::default()
+            .fg(theme.title_value_alt)
+            .bg(theme.surface_alt);
+
+        if is_assistant {
             rows.push(Line::raw(""));
             rows.push(Line::from(vec![
                 Span::styled(
@@ -2710,8 +2722,9 @@ fn transcript_lines(
             ]));
             rows.push(Line::raw(""));
         }
+
         let is_pending_assistant = is_busy
-            && message.role == "assistant"
+            && is_assistant
             && idx + 1 == messages.len()
             && message.content.trim().is_empty();
         let content = if is_pending_assistant {
@@ -2721,45 +2734,159 @@ fn transcript_lines(
         } else {
             message.content.clone()
         };
-        let mut lines = content.lines();
-        if let Some(first) = lines.next() {
-            if is_assistant {
-                rows.push(Line::styled(
-                    first.to_string(),
-                    Style::default().fg(theme.text),
-                ));
-            } else {
-                rows.push(Line::from(vec![
-                    Span::styled(
-                        format!("{label}:"),
-                        Style::default()
-                            .fg(label_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!(" {first}"), Style::default().fg(theme.text)),
-                ]));
+
+        let mut in_code_block = false;
+        let mut code_highlighter: Option<HighlightLines<'static>> = None;
+        let mut code_lines: Vec<String> = Vec::new();
+        let mut wrote_any = false;
+        let mut wrote_first_content_line = false;
+
+        for line in content.lines() {
+            let is_fence = line.trim_start().starts_with("```");
+            if is_fence {
+                if !in_code_block {
+                    let lang = line.trim_start().trim_start_matches("```").trim();
+                    let code_label = if lang.is_empty() {
+                        "code".to_string()
+                    } else {
+                        format!("code: {lang}")
+                    };
+                    rows.push(Line::from(vec![
+                        Span::styled("  ╭─ ".to_string(), rail_style),
+                        Span::styled(code_label, rail_style.add_modifier(Modifier::BOLD)),
+                    ]));
+                    code_highlighter = build_code_highlighter(
+                        if lang.is_empty() { None } else { Some(lang) },
+                        theme,
+                    );
+                    code_lines.clear();
+                    in_code_block = true;
+                    wrote_any = true;
+                } else {
+                    let block_width = code_lines
+                        .iter()
+                        .map(|l| l.chars().count())
+                        .max()
+                        .unwrap_or(0);
+                    for (line_idx, code_line) in code_lines.iter().enumerate() {
+                        let mut spans: Vec<Span<'static>> = Vec::new();
+                        if !is_assistant && !wrote_first_content_line && line_idx == 0 {
+                            spans.push(Span::styled(
+                                format!("{label}:"),
+                                Style::default()
+                                    .fg(label_color)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        } else if !is_assistant {
+                            spans.push(Span::styled(
+                                wrap_pad.to_string(),
+                                Style::default().fg(theme.text),
+                            ));
+                        }
+                        spans.push(Span::styled("  │ ".to_string(), gutter_style));
+                        spans.extend(highlighted_code_spans(
+                            code_line,
+                            &mut code_highlighter,
+                            code_style,
+                        ));
+                        let pad = block_width.saturating_sub(code_line.chars().count());
+                        if pad > 0 {
+                            spans.push(Span::styled(" ".repeat(pad), code_style));
+                        }
+                        rows.push(Line::from(spans));
+                        wrote_first_content_line = true;
+                    }
+                    rows.push(Line::styled("  ╰────────────────".to_string(), rail_style));
+                    code_lines.clear();
+                    code_highlighter = None;
+                    in_code_block = false;
+                    wrote_any = true;
+                }
+                continue;
             }
-            for line in lines {
+
+            if in_code_block {
+                code_lines.push(line.to_string());
+                wrote_any = true;
+                continue;
+            }
+
+            if !wrote_first_content_line {
+                if is_assistant {
+                    rows.push(Line::styled(
+                        line.to_string(),
+                        Style::default().fg(theme.text),
+                    ));
+                } else {
+                    rows.push(Line::from(vec![
+                        Span::styled(
+                            format!("{label}:"),
+                            Style::default()
+                                .fg(label_color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(format!(" {line}"), Style::default().fg(theme.text)),
+                    ]));
+                }
+                wrote_first_content_line = true;
+            } else {
                 rows.push(Line::styled(
                     format!("{wrap_pad}{line}"),
                     Style::default().fg(theme.text),
                 ));
             }
-        } else {
-            if !is_assistant {
-                rows.push(Line::styled(
-                    format!("{label}:"),
-                    Style::default()
-                        .fg(label_color)
-                        .add_modifier(Modifier::BOLD),
+            wrote_any = true;
+        }
+
+        if in_code_block {
+            let block_width = code_lines
+                .iter()
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(0);
+            for (line_idx, code_line) in code_lines.iter().enumerate() {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                if !is_assistant && !wrote_first_content_line && line_idx == 0 {
+                    spans.push(Span::styled(
+                        format!("{label}:"),
+                        Style::default()
+                            .fg(label_color)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                } else if !is_assistant {
+                    spans.push(Span::styled(
+                        wrap_pad.to_string(),
+                        Style::default().fg(theme.text),
+                    ));
+                }
+                spans.push(Span::styled("  │ ".to_string(), gutter_style));
+                spans.extend(highlighted_code_spans(
+                    code_line,
+                    &mut code_highlighter,
+                    code_style,
                 ));
+                let pad = block_width.saturating_sub(code_line.chars().count());
+                if pad > 0 {
+                    spans.push(Span::styled(" ".repeat(pad), code_style));
+                }
+                rows.push(Line::from(spans));
+                wrote_first_content_line = true;
             }
+            rows.push(Line::styled("  ╰────────────────".to_string(), rail_style));
+        }
+
+        if !wrote_any && !is_assistant {
+            rows.push(Line::styled(
+                format!("{label}:"),
+                Style::default()
+                    .fg(label_color)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
         rows.push(Line::raw(""));
     }
     rows
 }
-
 fn status_color(message: &str, theme: ThemePalette) -> Color {
     let lower = message.to_ascii_lowercase();
     if lower.contains("error") || lower.contains("failed") {
@@ -2773,6 +2900,67 @@ fn status_color(message: &str, theme: ThemePalette) -> Color {
     } else {
         theme.muted
     }
+}
+
+fn syntax_assets() -> &'static (SyntaxSet, ThemeSet) {
+    static ASSETS: OnceLock<(SyntaxSet, ThemeSet)> = OnceLock::new();
+    ASSETS.get_or_init(|| {
+        (
+            SyntaxSet::load_defaults_newlines(),
+            ThemeSet::load_defaults(),
+        )
+    })
+}
+
+fn build_code_highlighter(
+    language: Option<&str>,
+    theme: ThemePalette,
+) -> Option<HighlightLines<'static>> {
+    let (syntax_set, theme_set) = syntax_assets();
+    let syntax = language
+        .and_then(|lang| syntax_set.find_syntax_by_token(lang))
+        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
+    let syntect_theme = select_syntect_theme(theme_set, theme)?;
+    Some(HighlightLines::new(syntax, syntect_theme))
+}
+
+fn select_syntect_theme(theme_set: &ThemeSet, theme: ThemePalette) -> Option<&SyntectTheme> {
+    let preferred = if relative_luminance(theme.base) < 0.5 {
+        "base16-ocean.dark"
+    } else {
+        "InspiredGitHub"
+    };
+    theme_set
+        .themes
+        .get(preferred)
+        .or_else(|| theme_set.themes.values().next())
+}
+
+fn highlighted_code_spans(
+    line: &str,
+    highlighter: &mut Option<HighlightLines<'static>>,
+    fallback_style: Style,
+) -> Vec<Span<'static>> {
+    let Some(highlighter) = highlighter.as_mut() else {
+        return vec![Span::styled(line.to_string(), fallback_style)];
+    };
+    let (syntax_set, _) = syntax_assets();
+    let Ok(ranges) = highlighter.highlight_line(line, syntax_set) else {
+        return vec![Span::styled(line.to_string(), fallback_style)];
+    };
+    if ranges.is_empty() {
+        return vec![Span::styled(line.to_string(), fallback_style)];
+    }
+    ranges
+        .into_iter()
+        .map(|(style, segment)| {
+            let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
+            Span::styled(
+                segment.to_string(),
+                fallback_style.patch(Style::default().fg(fg)),
+            )
+        })
+        .collect()
 }
 
 fn max_scroll_for_view(total_lines: usize, view_height: usize) -> u16 {
