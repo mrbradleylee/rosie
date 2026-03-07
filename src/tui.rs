@@ -38,6 +38,7 @@ struct AppState {
     model: String,
     composer_input: String,
     command_input: String,
+    command_selected_index: usize,
     messages: Vec<ChatMessage>,
     active_session_id: i64,
     sessions: Vec<SessionSummary>,
@@ -77,6 +78,7 @@ impl AppState {
             model: model.to_string(),
             composer_input: String::new(),
             command_input: String::new(),
+            command_selected_index: 0,
             messages,
             active_session_id,
             sessions,
@@ -462,10 +464,26 @@ fn run_loop(
             frame.render_widget(footer, root[3]);
 
             if app.mode == InputMode::CommandPalette {
-                let popup = centered_rect(60, 3, frame.area());
-                let command = Paragraph::new(format!(":{}", app.command_input))
+                let popup = centered_rect(70, 12, frame.area());
+                let mut rows = Vec::new();
+                rows.push(format!(":{}", app.command_input));
+                rows.push(String::new());
+                rows.push("Commands (j/k or arrows to select, Enter to run):".to_string());
+                let suggestions = palette_suggestions(&app.command_input);
+                if suggestions.is_empty() {
+                    rows.push("  (no matching commands)".to_string());
+                } else {
+                    let selected = app.command_selected_index.min(suggestions.len().saturating_sub(1));
+                    for (idx, item) in suggestions.iter().enumerate() {
+                        let marker = if idx == selected { ">" } else { " " };
+                        rows.push(format!("{marker} {item}"));
+                    }
+                }
+                let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
+                let command = Paragraph::new(lines)
                     .block(Block::default().borders(Borders::ALL).title("Command"))
-                    .alignment(Alignment::Left);
+                    .alignment(Alignment::Left)
+                    .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
                 frame.render_widget(command, popup);
             } else if app.mode == InputMode::ConfirmDelete {
@@ -657,6 +675,7 @@ fn run_loop(
                         app.pending_d = false;
                         app.mode = InputMode::CommandPalette;
                         app.command_input.clear();
+                        app.command_selected_index = 0;
                         app.status_message = "Command palette open.".to_string();
                     }
                     KeyCode::Char('?') => {
@@ -701,20 +720,29 @@ fn run_loop(
                         app.pending_d = false;
                         app.mode = InputMode::Normal;
                         app.command_input.clear();
+                        app.command_selected_index = 0;
                         app.status_message = "Command cancelled.".to_string();
                     }
                     KeyCode::Enter => {
-                        if run_palette_command(&mut app) {
+                        if run_palette_selected_command(&mut app) {
                             cancel_request(&mut app, true);
                             cancel_model_fetch(&mut app);
                             break;
                         }
                     }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        move_palette_selection_down(&mut app);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        move_palette_selection_up(&mut app);
+                    }
                     KeyCode::Backspace => {
                         app.command_input.pop();
+                        clamp_palette_selection(&mut app);
                     }
                     KeyCode::Char(ch) => {
                         app.command_input.push(ch);
+                        clamp_palette_selection(&mut app);
                     }
                     _ => {}
                 },
@@ -1262,11 +1290,94 @@ fn help_rows() -> Vec<String> {
         "  i: enter insert mode, Enter: send, Esc: return to normal".to_string(),
         "".to_string(),
         "Commands".to_string(),
-        "  :new  :rename [title]  :delete  :model  :models  :quit".to_string(),
+        "  :new  :rename [title]  :delete  :models  :quit".to_string(),
+        "  ':' palette shows a picklist; use j/k (or arrows) + Enter".to_string(),
         "  :help or ? opens this panel".to_string(),
         "".to_string(),
         "Global: Ctrl+C quits; Esc cancels in-flight stream in normal mode".to_string(),
     ]
+}
+
+const PALETTE_COMMANDS: &[&str] = &["help", "new", "rename", "delete", "models", "quit"];
+
+fn palette_suggestions(input: &str) -> Vec<&'static str> {
+    let trimmed = input
+        .trim()
+        .trim_start_matches(':')
+        .trim()
+        .to_ascii_lowercase();
+    let stem = trimmed.split_whitespace().next().unwrap_or("");
+    if stem.is_empty() {
+        return PALETTE_COMMANDS.to_vec();
+    }
+
+    PALETTE_COMMANDS
+        .iter()
+        .copied()
+        .filter(|command| command.starts_with(stem))
+        .collect()
+}
+
+fn clamp_palette_selection(app: &mut AppState) {
+    let suggestions = palette_suggestions(&app.command_input);
+    if suggestions.is_empty() {
+        app.command_selected_index = 0;
+    } else if app.command_selected_index >= suggestions.len() {
+        app.command_selected_index = suggestions.len() - 1;
+    }
+}
+
+fn move_palette_selection_up(app: &mut AppState) {
+    clamp_palette_selection(app);
+    app.command_selected_index = app.command_selected_index.saturating_sub(1);
+}
+
+fn move_palette_selection_down(app: &mut AppState) {
+    clamp_palette_selection(app);
+    let suggestions = palette_suggestions(&app.command_input);
+    if suggestions.is_empty() {
+        return;
+    }
+    app.command_selected_index = (app.command_selected_index + 1).min(suggestions.len() - 1);
+}
+
+fn run_palette_selected_command(app: &mut AppState) -> bool {
+    let trimmed = app.command_input.trim().trim_start_matches(':').trim();
+    let suggestions = palette_suggestions(&app.command_input);
+    if suggestions.is_empty() {
+        app.status_message = "No matching command.".to_string();
+        return false;
+    }
+    let selected = suggestions[app.command_selected_index.min(suggestions.len() - 1)];
+
+    if trimmed.is_empty() {
+        if selected == "rename" {
+            app.command_input = "rename ".to_string();
+            app.status_message = "Type a title after :rename".to_string();
+            return false;
+        }
+        app.command_input = selected.to_string();
+        return run_palette_command(app);
+    }
+
+    let has_args = trimmed.contains(char::is_whitespace);
+    let stem = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let is_exact = PALETTE_COMMANDS.iter().any(|item| *item == stem);
+
+    if !has_args && !is_exact {
+        if selected == "rename" {
+            app.command_input = "rename ".to_string();
+            app.status_message = "Type a title after :rename".to_string();
+            return false;
+        }
+        app.command_input = selected.to_string();
+    }
+
+    run_palette_command(app)
 }
 
 fn transcript_rows(messages: &[ChatMessage]) -> Vec<String> {
@@ -1570,10 +1681,6 @@ fn run_palette_command(app: &mut AppState) -> bool {
             open_model_picker(app);
             false
         }
-        "model" => {
-            app.status_message = format!("Active model: {}", app.model);
-            false
-        }
         "help" => {
             app.mode = InputMode::Help;
             app.status_message = "Help open.".to_string();
@@ -1732,6 +1839,38 @@ mod tests {
             assert!(!run_palette_command(&mut app));
             assert!(matches!(app.mode, InputMode::Help));
             assert_eq!(app.status_message, "Help open.");
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn command_palette_picklist_behaves_as_expected() {
+        let db_path = temp_db_path("palette-picklist");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open store");
+            let loaded = store.load_or_create_active_session().expect("load");
+            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+            app.mode = InputMode::CommandPalette;
+            let initial_active = app.active_session_id;
+
+            app.command_selected_index = 2; // rename
+            assert!(!run_palette_selected_command(&mut app));
+            assert_eq!(app.command_input, "rename ");
+            assert!(matches!(app.mode, InputMode::CommandPalette));
+
+            app.command_input.clear();
+            app.command_selected_index = 1; // new
+            assert!(!run_palette_selected_command(&mut app));
+            assert!(matches!(app.mode, InputMode::Normal));
+            assert_ne!(app.active_session_id, initial_active);
+
+            app.mode = InputMode::CommandPalette;
+            app.command_input = "he".to_string();
+            app.command_selected_index = 0;
+            assert!(!run_palette_selected_command(&mut app));
+            assert!(matches!(app.mode, InputMode::Help));
         }
 
         let _ = fs::remove_file(&db_path);

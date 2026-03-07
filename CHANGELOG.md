@@ -17,6 +17,7 @@
 - Added session delete confirmation modal (`[Y/n]`, default yes on Enter) used by both `:delete` and sessions-pane `dd`
 - Added TUI unit tests covering SQLite session persistence across restart, session switching, and confirmed session deletion flows (`dd` and `:delete`)
 - Added `:models` TUI command with a floating model picker that loads available models from Ollama `/api/tags` and applies selection to the active session model
+- Added a command picklist in the `:` panel with keyboard selection (`j`/`k` or arrows) and `Enter` to run
 
 ### Changed
 
@@ -39,6 +40,7 @@
 - Updated TUI composer to show a visible cursor in `Insert` mode
 - Updated transcript scroll bounds to use Ratatui rendered line counts, improving bottom-of-chat scrolling for long wrapped output
 - Updated TUI footer help text to a compact set of core actions and moved full key/command guidance into a dedicated help modal (`?` / `:help`)
+- Updated TUI help/docs to remove `:model`, rely on header display plus `:models` for model changes, and document the command-panel picklist
 
 ### Removed
 

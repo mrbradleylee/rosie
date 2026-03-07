@@ -91,9 +91,9 @@ In the default TUI:
   - `:new`
   - `:rename [title]` (empty title clears it)
   - `:delete`
-  - `:model` (show active model)
   - `:models` (open model picker from Ollama `/api/tags`)
   - `:quit`
+- in the `:` command panel, use `j`/`k` (or arrows) to select from the command picklist and `Enter` to run
 - delete actions require confirmation (`[Y/n]`; `Enter` defaults to `Y`)
 - in the model picker, use `j`/`k` (or arrows) to move, `Enter` to apply, and `Esc` to cancel
 - press `Esc` in `Normal` to cancel an in-flight request
