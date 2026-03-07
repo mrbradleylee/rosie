@@ -73,7 +73,7 @@ struct ChatMessage {
 }
 
 enum StreamEvent {
-    Response(String),
+    Token(String),
     Done,
     Error(String),
 }
@@ -113,7 +113,7 @@ fn run_loop(
                 "Rosie TUI | Mode: {mode_label} | Host: {} | Model: {}{}",
                 app.host,
                 app.model,
-                if app.is_busy() { " | Request in flight..." } else { "" }
+                if app.is_busy() { " | Streaming..." } else { "" }
             ))
             .block(Block::default().borders(Borders::ALL).title("Status"))
             .style(Style::default().add_modifier(Modifier::BOLD));
@@ -154,7 +154,7 @@ fn run_loop(
             let footer_help = match app.mode {
                 InputMode::Normal => {
                     if app.is_busy() {
-                        "i: insert (disabled) | : command palette | Esc: cancel request | Ctrl+C: quit"
+                        "i: insert (disabled) | : command palette | Esc: cancel stream | Ctrl+C: quit"
                     } else {
                         "i: insert | : command palette | Ctrl+C: quit"
                     }
@@ -190,7 +190,7 @@ fn run_loop(
                     KeyCode::Char('i') => {
                         if app.is_busy() {
                             app.status_message =
-                                "Wait for request to finish or press Esc to cancel.".to_string();
+                                "Wait for streaming to finish or press Esc to cancel.".to_string();
                         } else {
                             app.mode = InputMode::Insert;
                             app.status_message = "Insert mode.".to_string();
@@ -253,7 +253,7 @@ fn run_loop(
 
 fn submit_composer_message(app: &mut AppState) {
     if app.is_busy() {
-        app.status_message = "A response is already in progress.".to_string();
+        app.status_message = "A response is already streaming.".to_string();
         return;
     }
 
@@ -280,7 +280,7 @@ fn submit_composer_message(app: &mut AppState) {
     let model = app.model.clone();
 
     let handle = tokio::spawn(async move {
-        if let Err(err) = request_ollama_chat(&host, &model, request_messages, tx.clone()).await {
+        if let Err(err) = stream_ollama_chat(&host, &model, request_messages, tx.clone()).await {
             let _ = tx.send(StreamEvent::Error(err.to_string()));
         }
     });
@@ -301,15 +301,16 @@ fn process_stream_events(app: &mut AppState) {
     let mut done = false;
     loop {
         match in_flight.receiver.try_recv() {
-            Ok(StreamEvent::Response(content)) => {
+            Ok(StreamEvent::Token(content)) => {
                 if let Some(last) = app.messages.last_mut() {
                     if last.role == "assistant" {
-                        last.content = content;
+                        last.content.push_str(&content);
                     }
                 }
-                app.status_message = "Response received.".to_string();
+                app.status_message = "Streaming response...".to_string();
             }
             Ok(StreamEvent::Done) => {
+                app.status_message = "Response complete.".to_string();
                 done = true;
                 break;
             }
@@ -345,7 +346,7 @@ fn cancel_request(app: &mut AppState, silent: bool) {
             }
         }
         if !silent {
-            app.status_message = "Request cancelled.".to_string();
+            app.status_message = "Streaming cancelled.".to_string();
         }
     }
 }
@@ -358,17 +359,18 @@ struct OllamaChatRequest {
 }
 
 #[derive(Deserialize)]
-struct OllamaChatResponse {
-    message: Option<OllamaChatMessage>,
+struct OllamaChatChunk {
+    message: Option<OllamaChunkMessage>,
+    done: Option<bool>,
     error: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct OllamaChatMessage {
+struct OllamaChunkMessage {
     content: Option<String>,
 }
 
-async fn request_ollama_chat(
+async fn stream_ollama_chat(
     host: &str,
     model: &str,
     messages: Vec<ChatMessage>,
@@ -379,10 +381,10 @@ async fn request_ollama_chat(
     let request = OllamaChatRequest {
         model: model.to_string(),
         messages,
-        stream: false,
+        stream: true,
     };
 
-    let resp = client
+    let mut resp = client
         .post(url)
         .json(&request)
         .send()
@@ -397,24 +399,53 @@ async fn request_ollama_chat(
         ));
     }
 
-    let parsed: OllamaChatResponse = resp
-        .json()
+    let mut buffer = String::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| anyhow!("Failed to parse Ollama response JSON: {e}"))?;
+        .map_err(|e| anyhow!("Stream read error: {e}"))?
+    {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-    if let Some(error) = parsed.error {
-        return Err(anyhow!(error));
+        while let Some(newline_pos) = buffer.find('\n') {
+            let line = buffer[..newline_pos].trim().to_string();
+            buffer = buffer[newline_pos + 1..].to_string();
+            if line.is_empty() {
+                continue;
+            }
+            parse_and_emit_line(&line, &tx)?;
+        }
     }
 
-    let content = parsed
-        .message
-        .and_then(|message| message.content)
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| anyhow!("Ollama returned no assistant content"))?;
+    let remainder = buffer.trim();
+    if !remainder.is_empty() {
+        parse_and_emit_line(remainder, &tx)?;
+    }
 
-    let _ = tx.send(StreamEvent::Response(content));
     let _ = tx.send(StreamEvent::Done);
+    Ok(())
+}
+
+fn parse_and_emit_line(line: &str, tx: &mpsc::UnboundedSender<StreamEvent>) -> Result<()> {
+    let parsed: OllamaChatChunk =
+        serde_json::from_str(line).map_err(|e| anyhow!("Failed to parse stream JSON: {e}"))?;
+
+    if let Some(error) = parsed.error {
+        let _ = tx.send(StreamEvent::Error(error));
+        return Ok(());
+    }
+
+    if let Some(message) = parsed.message
+        && let Some(content) = message.content
+        && !content.is_empty()
+    {
+        let _ = tx.send(StreamEvent::Token(content));
+    }
+
+    if parsed.done.unwrap_or(false) {
+        let _ = tx.send(StreamEvent::Done);
+    }
+
     Ok(())
 }
 

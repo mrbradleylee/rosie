@@ -9,7 +9,7 @@
 - Added default no-flag runtime path that launches a minimal TUI shell scaffold
 - Added TUI modal interaction with explicit `Normal`/`Insert` modes (`i` to enter input, `Esc` to return to normal)
 - Added floating `:` command panel in the TUI scaffold with initial commands (`:help`, `:new`, `:model`, `:quit`)
-- Added Ollama-backed TUI chat requests from composer input (`Enter` in `Insert`), with assistant replies appended to transcript
+- Added Ollama-backed TUI chat requests from composer input (`Enter` in `Insert`), with assistant tokens streamed into transcript
 
 ### Changed
 
