@@ -549,22 +549,13 @@ fn run_loop(
             } else {
                 theme.success
             };
-            let mode_color = status_mode_color(app.mode, theme);
-            let mode_width = mode_label.chars().count();
             let stream_width = streaming_label.chars().count();
-            let fixed_width = "Mode: ".chars().count() + mode_width + " | ".chars().count()
-                + " | ".chars().count()
-                + stream_width;
+            let fixed_width = "Session: ".chars().count() + " | ".chars().count() + stream_width;
             let max_width = root[0].width.saturating_sub(2) as usize;
             let session_max = max_width.saturating_sub(fixed_width);
             let header_session = truncate_with_ellipsis(&header_session_title, session_max);
             let header_line = Line::from(vec![
-                Span::styled("Mode: ", Style::default().fg(theme.title_meta)),
-                Span::styled(
-                    mode_label.to_string(),
-                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                Span::styled("Session: ", Style::default().fg(theme.title_meta)),
                 Span::styled(
                     header_session,
                     Style::default()
@@ -825,20 +816,34 @@ fn run_loop(
                 InputMode::Help => "Help: Esc/q/? close",
             };
             let footer_width = root[3].width as usize;
-            let footer_text = responsive_footer_text(
-                app.mode,
-                app.is_busy(),
-                footer_help,
-                &app.status_message,
-                footer_width,
-            );
-            let footer = Paragraph::new(footer_text)
-                .style(
-                    Style::default()
-                        .bg(theme.highlight_mid)
-                        .fg(status_color(&app.status_message, theme))
-                        .add_modifier(Modifier::DIM),
-                );
+            let compact_help = if footer_width < 80 {
+                compact_footer_help(app.mode, app.is_busy())
+            } else {
+                footer_help.to_string()
+            };
+            let mode_chip = mode_label.to_string();
+            let status_text = if app.status_message.trim().is_empty() {
+                "Ready.".to_string()
+            } else {
+                app.status_message.clone()
+            };
+            let mut footer_spans = vec![Span::styled(
+                format!("[{mode_chip}] "),
+                Style::default()
+                    .bg(theme.highlight_mid)
+                    .fg(status_mode_color(app.mode, theme))
+                    .add_modifier(Modifier::BOLD),
+            )];
+            footer_spans.extend(footer_help_spans(&compact_help, theme));
+            footer_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
+            footer_spans.push(Span::styled(
+                status_text.clone(),
+                Style::default()
+                    .fg(status_color(&status_text, theme))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            let footer = Paragraph::new(Line::from(footer_spans))
+                .style(Style::default().bg(theme.highlight_mid).fg(theme.text));
             frame.render_widget(footer, root[3]);
 
             if app.mode == InputMode::CommandPalette {
@@ -3007,25 +3012,6 @@ fn highlighted_code_spans(
         .collect()
 }
 
-fn responsive_footer_text(
-    mode: InputMode,
-    is_busy: bool,
-    full_help: &str,
-    status: &str,
-    width: usize,
-) -> String {
-    let help = if width < 80 {
-        compact_footer_help(mode, is_busy)
-    } else {
-        full_help.to_string()
-    };
-    if width == 0 {
-        return String::new();
-    }
-    let combined = format!("{help} | {status}");
-    truncate_with_ellipsis(&combined, width)
-}
-
 fn compact_footer_help(mode: InputMode, is_busy: bool) -> String {
     match mode {
         InputMode::Landing => "Enter send | Ctrl+P cmd".to_string(),
@@ -3045,6 +3031,71 @@ fn compact_footer_help(mode: InputMode, is_busy: bool) -> String {
         InputMode::ThemeSelect => "j/k move | Enter select".to_string(),
         InputMode::Help => "Esc/q/? close".to_string(),
     }
+}
+
+fn footer_help_spans(help: &str, theme: ThemePalette) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut first = true;
+    for segment in help.split(" | ") {
+        if !first {
+            spans.push(Span::styled(
+                " | ".to_string(),
+                Style::default().fg(theme.title_meta),
+            ));
+        }
+        first = false;
+        spans.extend(footer_segment_spans(segment, theme));
+    }
+    spans
+}
+
+fn footer_segment_spans(segment: &str, theme: ThemePalette) -> Vec<Span<'static>> {
+    let trimmed = segment.trim();
+    if trimmed.is_empty() {
+        return vec![Span::raw("")];
+    }
+    let Some((keys, desc)) = trimmed.split_once(' ') else {
+        return vec![Span::styled(
+            trimmed.to_string(),
+            Style::default()
+                .fg(theme.title_value_alt)
+                .add_modifier(Modifier::BOLD),
+        )];
+    };
+
+    let key_style = Style::default()
+        .fg(theme.title_value_alt)
+        .add_modifier(Modifier::BOLD);
+    let desc_color = footer_desc_color(desc, theme);
+    vec![
+        Span::styled(keys.to_string(), key_style),
+        Span::styled(format!(" {desc}"), Style::default().fg(desc_color)),
+    ]
+}
+
+fn footer_desc_color(desc: &str, theme: ThemePalette) -> Color {
+    let lower = desc.to_ascii_lowercase();
+    if lower.contains("delete") || lower.contains("failed") {
+        return theme.error;
+    }
+    if lower.contains("cancel") || lower.contains("quit") || lower.contains("close") {
+        return theme.warn;
+    }
+    if lower.contains("new")
+        || lower.contains("save")
+        || lower.contains("run")
+        || lower.contains("send")
+        || lower.contains("switch")
+        || lower.contains("select")
+        || lower.contains("apply")
+        || lower.contains("compose")
+        || lower.contains("jump")
+        || lower.contains("help")
+        || lower.contains("cmd")
+    {
+        return theme.success;
+    }
+    theme.title_label
 }
 
 fn transcript_position_label(scroll: u16, max_scroll: u16) -> String {
