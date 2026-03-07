@@ -446,10 +446,7 @@ fn run_loop(
             };
             let active_title = active_session_title(&app);
             let header = Paragraph::new(format!(
-                "Rosie TUI | Mode: {mode_label} | Session: {} | Host: {} | Model: {}{}",
-                active_title,
-                app.host,
-                app.model,
+                "🤖 Rosie | Mode: {mode_label}{}",
                 if app.is_busy() { " | Streaming..." } else { "" }
             ))
             .block(Block::default().borders(Borders::ALL).title("Status"))
@@ -462,13 +459,18 @@ fn run_loop(
             });
             app.transcript_view_width = transcript_inner.width.max(1) as usize;
             app.transcript_view_height = transcript_inner.height.max(1) as usize;
-            let transcript_rows = transcript_rows(&app.messages);
+            let transcript_rows = transcript_rows(&app.messages, app.is_busy());
             let transcript_lines: Vec<Line<'_>> = transcript_rows
                 .iter()
                 .map(|row| Line::from(row.as_str()))
                 .collect();
+            let transcript_title = if app.is_busy() {
+                format!("Transcript | {active_title} | Streaming...")
+            } else {
+                format!("Transcript | {active_title}")
+            };
             let transcript_base = Paragraph::new(transcript_lines)
-                .block(Block::default().borders(Borders::ALL).title("Transcript"))
+                .block(Block::default().borders(Borders::ALL).title(transcript_title))
                 .wrap(Wrap { trim: false });
             let total_lines = transcript_base.line_count(app.transcript_view_width as u16);
             let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
@@ -481,8 +483,9 @@ fn run_loop(
             let transcript = transcript_base.scroll((app.transcript_scroll, 0));
             frame.render_widget(transcript, root[1]);
 
+            let composer_title = format!("Composer | Model: {}", app.model);
             let composer = Paragraph::new(app.composer_input.as_str())
-                .block(Block::default().borders(Borders::ALL).title("Composer"))
+                .block(Block::default().borders(Borders::ALL).title(composer_title))
                 .wrap(Wrap { trim: false });
             frame.render_widget(composer, root[2]);
             if app.mode == InputMode::Insert {
@@ -1847,19 +1850,25 @@ fn run_palette_selected_command(app: &mut AppState) -> bool {
     run_palette_command(app)
 }
 
-fn transcript_rows(messages: &[ChatMessage]) -> Vec<String> {
+fn transcript_rows(messages: &[ChatMessage], is_busy: bool) -> Vec<String> {
     if messages.is_empty() {
         return vec!["No messages yet. Press i, type, then Enter.".to_string()];
     }
 
     let mut rows = Vec::new();
-    for message in messages {
+    for (idx, message) in messages.iter().enumerate() {
         let label = match message.role.as_str() {
             "user" => "You",
             "assistant" => "Assistant",
             _ => "System",
         };
-        let content = if message.content.is_empty() {
+        let is_pending_assistant = is_busy
+            && message.role == "assistant"
+            && idx + 1 == messages.len()
+            && message.content.trim().is_empty();
+        let content = if is_pending_assistant {
+            "[waiting for model response...]".to_string()
+        } else if message.content.is_empty() {
             String::new()
         } else {
             message.content.clone()

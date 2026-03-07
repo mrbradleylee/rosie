@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- Simplified the TUI status header to focus on mode/streaming state and removed non-actionable host details
+- Moved active session context into the transcript title and model context into the composer title
+- Added an in-transcript pending response indicator (`[waiting for model response...]`) while streaming before assistant tokens arrive
+- Updated the TUI status header label from `Rosie TUI` to `🤖 Rosie`
+
 ## 0.7.0
 
 ### Added
