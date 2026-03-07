@@ -11,6 +11,9 @@
 - Added floating `:` command panel in the TUI scaffold with initial commands (`:help`, `:new`, `:model`, `:quit`)
 - Added Ollama-backed TUI chat requests from composer input (`Enter` in `Insert`), with assistant tokens streamed into transcript
 - Added transcript scrolling controls in TUI `Normal` mode (`j`/`k`, arrow keys, `PageUp`/`PageDown`, `Ctrl+u`/`Ctrl+d`, `gg`, `G`) with auto-follow to newest output during streaming
+- Added SQLite-backed TUI session persistence (`sessions` and `messages` tables), including startup load/auto-create of active session and transcript hydration on launch
+- Added interactive TUI session list behavior: pane focus toggle (`Tab`), keyboard selection (`j`/`k`, `gg`, `G`), and `Enter` to switch/load persisted sessions
+- Added TUI session management commands in `:` palette: `:rename [title]`, `:archive`, and `:delete`
 
 ### Changed
 
@@ -22,6 +25,9 @@
 - Updated `--configure` model prompts so numeric model selection works consistently for default, ask, and cmd model choices, with explicit confirm/reselect after resolving each choice
 - Updated TUI key behavior so `Esc` in `Normal` cancels in-flight requests and `Ctrl+C` quits from any mode
 - Updated TUI transcript/composer rendering to wrap and stay constrained to pane bounds
+- Updated TUI message flow to persist user and assistant messages as they arrive, including streamed assistant updates and `:new` creating a new persisted session
+- Updated sessions pane to render real persisted session data (active marker, selection marker, message counts) instead of placeholder text
+- Updated `:help` command output to include the new session management commands
 
 ### Removed
 

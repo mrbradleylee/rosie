@@ -136,10 +136,16 @@ async fn launch_tui(runtime_model: Option<&str>) -> Result<()> {
             .await?
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("No Ollama models found. Run `ollama pull <model>` and retry."))?,
+            .ok_or_else(|| {
+                anyhow!("No Ollama models found. Run `ollama pull <model>` and retry.")
+            })?,
     };
 
-    tui::run(&host, &model)?;
+    let data_dir = app_data_dir()?;
+    fs::create_dir_all(&data_dir)?;
+    let db_path = data_dir.join("sessions.sqlite3");
+
+    tui::run(&host, &model, &db_path)?;
     Ok(())
 }
 
@@ -394,7 +400,9 @@ async fn resolve_request_context(
             .await?
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("No Ollama models found. Run `ollama pull <model>` and retry."))?,
+            .ok_or_else(|| {
+                anyhow!("No Ollama models found. Run `ollama pull <model>` and retry.")
+            })?,
     };
 
     Ok(RequestContext {
@@ -908,7 +916,10 @@ async fn configure() -> Result<()> {
     println!("Press enter to keep the current value.");
     let ollama_host = prompt_config_value(
         "Ollama host",
-        existing.ollama_host.as_deref().or(Some(DEFAULT_OLLAMA_HOST)),
+        existing
+            .ollama_host
+            .as_deref()
+            .or(Some(DEFAULT_OLLAMA_HOST)),
         true,
     )?;
 
@@ -921,7 +932,11 @@ async fn configure() -> Result<()> {
                 println!("  {}. {}", i + 1, model_id);
             }
 
-            if models.is_empty() { None } else { Some(models) }
+            if models.is_empty() {
+                None
+            } else {
+                Some(models)
+            }
         }
         Err(err) => {
             let message = format!("Model discovery failed: {}", err);
@@ -1060,7 +1075,8 @@ fn prompt_model_with_confirmation(
     let mut suggested = current.map(str::to_owned);
 
     loop {
-        let selection = prompt_model_config_value(label, suggested.as_deref(), allow_empty, models)?;
+        let selection =
+            prompt_model_config_value(label, suggested.as_deref(), allow_empty, models)?;
 
         if selection.is_empty() {
             println!(
@@ -1151,6 +1167,14 @@ fn config_path() -> Result<PathBuf> {
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .ok_or_else(|| anyhow!("Unable to determine config directory"))?;
     Ok(base.join("rosie").join("config.toml"))
+}
+
+fn app_data_dir() -> Result<PathBuf> {
+    let base = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .ok_or_else(|| anyhow!("Unable to determine data directory"))?;
+    Ok(base.join("rosie"))
 }
 
 fn local_bin_dir() -> Result<PathBuf> {
