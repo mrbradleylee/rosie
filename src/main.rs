@@ -1,6 +1,5 @@
 // src/main.rs
 use anyhow::{Result, anyhow};
-use dotenvy::dotenv;
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -18,16 +17,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{self as tokio_io, AsyncReadExt};
 
 const MAN_PAGE: &str = include_str!("../man/rosie.1");
+const DEFAULT_OLLAMA_HOST: &str = "http://localhost:11434";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenv().ok();
     env_logger::init();
 
     use clap::Parser;
     #[derive(Parser, Debug)]
     struct Args {
-        /// Configure stored API settings
+        /// Configure stored Ollama settings
         #[arg(long)]
         configure: bool,
 
@@ -92,6 +91,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let config = load_config()?;
+    let execution_enabled = config.execution_enabled.unwrap_or(true);
+
     // --cmd mode: preserve existing command generation flow
     loop {
         let generated = generate_command_with_spinner(&prompt, runtime_model.as_deref()).await?;
@@ -103,7 +105,7 @@ async fn main() -> Result<()> {
 
         print_generated_command(&generated);
 
-        match prompt_next_action()? {
+        match prompt_next_action(execution_enabled)? {
             NextAction::Execute => {
                 execute_command(&generated.command)?;
                 return Ok(());
@@ -142,15 +144,19 @@ struct GeneratedCommand {
 struct RequestContext {
     client: reqwest::Client,
     url: String,
-    key: String,
     model: String,
+}
+
+enum RuntimeMode {
+    Ask,
+    Cmd,
 }
 
 async fn llm_generate_command(
     prompt: &str,
     runtime_model: Option<&str>,
 ) -> Result<GeneratedCommand> {
-    let ctx = resolve_request_context(runtime_model)?;
+    let ctx = resolve_request_context(RuntimeMode::Cmd, runtime_model).await?;
     let command_prompt = format!(
         "You are an assistant that returns JSON with exactly two string fields: \
          \"command\" for the exact shell command, and \"summary\" for a brief \
@@ -158,8 +164,7 @@ async fn llm_generate_command(
          markdown fences or extra text.\n\nTask: {}",
         prompt
     );
-    let content =
-        send_chat_completion(&ctx.client, &ctx.url, &ctx.key, &ctx.model, command_prompt).await?;
+    let content = send_chat_completion(&ctx.client, &ctx.url, &ctx.model, command_prompt).await?;
     let mut generated = extract_generated_command(&content)?;
 
     if generated.command.is_empty() {
@@ -175,13 +180,13 @@ async fn llm_generate_command(
 }
 
 async fn llm_generate_chat(prompt: &str, runtime_model: Option<&str>) -> Result<String> {
-    let ctx = resolve_request_context(runtime_model)?;
+    let ctx = resolve_request_context(RuntimeMode::Ask, runtime_model).await?;
     let chat_prompt = format!(
         "You are a helpful assistant that answers questions naturally.\n\nAnswer the user's question clearly and concisely. Return your answer directly, without markdown fences or extra text.\n\nTask: {}",
         prompt
     );
 
-    send_chat_completion(&ctx.client, &ctx.url, &ctx.key, &ctx.model, chat_prompt).await
+    send_chat_completion(&ctx.client, &ctx.url, &ctx.model, chat_prompt).await
 }
 
 async fn generate_chat_with_spinner(prompt: &str, runtime_model: Option<&str>) -> Result<String> {
@@ -191,7 +196,6 @@ async fn generate_chat_with_spinner(prompt: &str, runtime_model: Option<&str>) -
 async fn send_chat_completion(
     client: &reqwest::Client,
     url: &str,
-    key: &str,
     model: &str,
     content: String,
 ) -> Result<String> {
@@ -205,7 +209,6 @@ async fn send_chat_completion(
 
     let resp = client
         .post(url)
-        .bearer_auth(key)
         .json(&request_body)
         .send()
         .await
@@ -241,46 +244,44 @@ async fn send_chat_completion(
         .ok_or_else(|| anyhow!("No choices returned"))
 }
 
-/// Discover available models from the API endpoint
-async fn discover_models(endpoint: &str, key: &str) -> Result<Vec<String>> {
+/// Discover available models from Ollama.
+async fn discover_ollama_models(host: &str) -> Result<Vec<String>> {
     use reqwest::Client;
 
-    let url = format!("{}/v1/models", endpoint.trim_end_matches('/'));
+    let url = format!("{}/api/tags", host.trim_end_matches('/'));
 
     let client = Client::new();
 
-    // GET /v1/models - returns list of available models with their IDs
     let resp = client
         .get(&url)
-        .bearer_auth(key)
         .send()
         .await
         .map_err(|e| anyhow!("HTTP send error for model discovery: {}", e))?;
 
     if !resp.status().is_success() {
         return Err(anyhow!(
-            "Model discovery API returned {}: {}",
+            "Model discovery returned {}: {}",
             resp.status(),
             resp.text().await?
         ));
     }
 
     #[derive(serde::Deserialize)]
-    struct ModelInfo {
-        id: String,
+    struct OllamaModel {
+        name: String,
     }
 
     #[derive(serde::Deserialize)]
-    struct ModelsListResponse {
-        data: Vec<ModelInfo>,
+    struct OllamaTagsResponse {
+        models: Vec<OllamaModel>,
     }
 
-    let response: ModelsListResponse = resp
+    let response: OllamaTagsResponse = resp
         .json()
         .await
         .map_err(|e| anyhow!("Failed to parse model discovery JSON: {}", e))?;
 
-    Ok(response.data.iter().map(|m| m.id.clone()).collect())
+    Ok(response.models.into_iter().map(|m| m.name).collect())
 }
 
 async fn read_prompt(args_prompt: Vec<String>, interactive: bool) -> Result<String> {
@@ -343,22 +344,43 @@ where
     result
 }
 
-fn resolve_request_context(runtime_model: Option<&str>) -> Result<RequestContext> {
+async fn resolve_request_context(
+    mode: RuntimeMode,
+    runtime_model: Option<&str>,
+) -> Result<RequestContext> {
     let config = load_config()?;
-    let endpoint = env::var("ROSIE_ENDPOINT")
-        .ok()
-        .or(config.endpoint)
-        .unwrap_or_else(|| "https://api.openai.com".to_string());
-    let key = resolve_api_key(&endpoint, config.allow_dummy_key_endpoints.as_deref())?;
+    let endpoint = config
+        .ollama_host
+        .clone()
+        .unwrap_or_else(|| DEFAULT_OLLAMA_HOST.to_string());
+
+    reqwest::Url::parse(&endpoint).map_err(|_| {
+        anyhow!(
+            "Invalid ollama_host '{}'. Set a full URL such as http://localhost:11434",
+            endpoint
+        )
+    })?;
+
     let model = runtime_model
         .map(str::to_owned)
-        .or_else(|| env::var("ROSIE_MODEL").ok().or(config.model))
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+        .or_else(|| match mode {
+            RuntimeMode::Ask => config.ask_model.clone(),
+            RuntimeMode::Cmd => config.cmd_model.clone(),
+        })
+        .or_else(|| config.effective_default_model());
+
+    let model = match model {
+        Some(model) => model,
+        None => discover_ollama_models(&endpoint)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("No Ollama models found. Run `ollama pull <model>` and retry."))?,
+    };
 
     Ok(RequestContext {
         client: reqwest::Client::new(),
         url: format!("{}/v1/chat/completions", endpoint.trim_end_matches('/')),
-        key,
         model,
     })
 }
@@ -369,11 +391,18 @@ enum NextAction {
     Quit,
 }
 
-fn prompt_next_action() -> Result<NextAction> {
+fn prompt_next_action(execution_enabled: bool) -> Result<NextAction> {
     loop {
-        let action = read_line(&action_prompt())?;
+        let action = read_line(&action_prompt(execution_enabled))?;
         match action.trim().to_ascii_lowercase().as_str() {
-            "e" | "execute" => return Ok(NextAction::Execute),
+            "e" | "execute" => {
+                if execution_enabled {
+                    return Ok(NextAction::Execute);
+                }
+                println!(
+                    "Execution is disabled. Set `execution_enabled = true` in config to enable."
+                );
+            }
             "r" | "reenter" | "re-enter" => return Ok(NextAction::ReenterPrompt),
             "q" | "quit" => return Ok(NextAction::Quit),
             _ => println!("Enter e, r, or q."),
@@ -553,8 +582,8 @@ fn ansi(code: &str, text: &str) -> String {
     }
 }
 
-fn action_prompt() -> String {
-    format!(
+fn action_prompt(execution_enabled: bool) -> String {
+    let base = format!(
         "[{}]{}, [{}]{}, or [{}]{}",
         ansi("1;95", "e"),
         "xecute",
@@ -562,7 +591,12 @@ fn action_prompt() -> String {
         "e-enter prompt",
         ansi("1;95", "q"),
         "uit"
-    )
+    );
+    if execution_enabled {
+        base
+    } else {
+        format!("{} (execute disabled)", base)
+    }
 }
 
 fn extract_command(content: &str) -> Result<String> {
@@ -768,9 +802,21 @@ fn summarize_program_name(program: &str) -> String {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoredConfig {
-    endpoint: Option<String>,
-    model: Option<String>,
-    allow_dummy_key_endpoints: Option<Vec<String>>,
+    ollama_host: Option<String>,
+    default_model: Option<String>,
+    ask_model: Option<String>,
+    cmd_model: Option<String>,
+    execution_enabled: Option<bool>,
+    #[serde(default, alias = "model", skip_serializing)]
+    legacy_model: Option<String>,
+}
+
+impl StoredConfig {
+    fn effective_default_model(&self) -> Option<String> {
+        self.default_model
+            .clone()
+            .or_else(|| self.legacy_model.clone())
+    }
 }
 
 fn rewrite_configure_flag<I>(args: I) -> Vec<std::ffi::OsString>
@@ -841,99 +887,82 @@ async fn configure() -> Result<()> {
 
     println!("Rosie configuration");
     println!("Press enter to keep the current value.");
-    println!("ROSIE_API_KEY is read from the environment and is not stored on disk.");
-
-    // Use default endpoint if not set for discovery, then prompt user
-    let endpoint = prompt_config_value("Endpoint", existing.endpoint.as_deref(), true)?;
-
-    let current_dummy_key_allowlist = existing
-        .allow_dummy_key_endpoints
-        .as_ref()
-        .map(|values| values.join(","));
-    let dummy_key_allowlist = prompt_config_value(
-        "Dummy-key fallback endpoints (comma-separated hosts, host:port, or URLs)",
-        current_dummy_key_allowlist.as_deref(),
+    let ollama_host = prompt_config_value(
+        "Ollama host",
+        existing.ollama_host.as_deref().or(Some(DEFAULT_OLLAMA_HOST)),
         true,
     )?;
 
-    let parsed_dummy_key_allowlist = parse_csv_list(dummy_key_allowlist);
+    let selected_from_discovery = match discover_ollama_models(&ollama_host).await {
+        Ok(models) => {
+            println!();
+            println!("Available models:");
 
-    let selected_from_discovery =
-        match resolve_api_key(&endpoint, parsed_dummy_key_allowlist.as_deref()) {
-            Ok(api_key) => match discover_models(&endpoint, &api_key).await {
-                Ok(models) => {
-                    println!();
-                    println!("Available models:");
+            for (i, model_id) in models.iter().enumerate() {
+                println!("  {}. {}", i + 1, model_id);
+            }
 
-                    // Display numbered list of available models
-                    for (i, model_id) in models.iter().enumerate() {
-                        println!("  {}. {}", i + 1, model_id);
-                    }
+            if models.is_empty() {
+                None
+            } else {
+                println!();
+                let input = prompt_config_value(
+                    "Select a default model by number or enter full model ID",
+                    None::<&str>,
+                    true,
+                )?;
 
-                    if !models.is_empty() {
-                        println!();
-
-                        let prompt_text =
-                            String::from("Select a model by number or enter the full model ID: ");
-                        let input = prompt_config_value(&prompt_text, None::<&str>, false)?;
-
-                        // Parse selection - try number first, then exact match, then fallback to current
-                        if !input.is_empty() {
-                            if let Ok(num) = input.parse::<usize>() {
-                                // Try to find matching index (1-based user input -> 0-based vector index)
-                                if num <= models.len() && num >= 1 {
-                                    Some(models[num - 1].clone())
-                                } else {
-                                    None
-                                }
-                            } else {
-                                // Try exact match with full model ID
-                                models
-                                    .iter()
-                                    .position(|m| m == &input)
-                                    .map(|idx| models[idx].clone())
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        // No available models - skip selection, use default below
-                        None
-                    }
-                }
-                Err(err) => {
-                    // Discovery failed (network/API/etc.), keep current config model value
-                    let message = format!("Model discovery failed: {}", err);
-                    if prompt_continue_or_exit(&message)? {
-                        None
-                    } else {
-                        return Ok(());
-                    }
-                }
-            },
-            Err(err) => {
-                let message = format!("Model discovery unavailable: {}", err);
-                if prompt_continue_or_exit(&message)? {
+                if input.is_empty() {
                     None
+                } else if let Ok(num) = input.parse::<usize>() {
+                    models.get(num.saturating_sub(1)).cloned()
+                } else if models.iter().any(|model| model == &input) {
+                    Some(input)
                 } else {
-                    return Ok(());
+                    Some(input)
                 }
             }
-        };
+        }
+        Err(err) => {
+            let message = format!("Model discovery failed: {}", err);
+            if prompt_continue_or_exit(&message)? {
+                None
+            } else {
+                return Ok(());
+            }
+        }
+    };
 
-    let model = prompt_config_value(
-        "Model",
+    let default_model = prompt_config_value(
+        "Default model",
         existing
-            .model
+            .effective_default_model()
             .as_deref()
             .or(selected_from_discovery.as_deref()),
         true,
     )?;
+    let ask_model = prompt_config_value(
+        "Ask model (optional, falls back to default model)",
+        existing.ask_model.as_deref(),
+        true,
+    )?;
+    let cmd_model = prompt_config_value(
+        "Cmd model (optional, falls back to default model)",
+        existing.cmd_model.as_deref(),
+        true,
+    )?;
+    let execution_enabled = prompt_bool_config_value(
+        "Enable command execution for --cmd",
+        existing.execution_enabled.unwrap_or(true),
+    )?;
 
     let config = StoredConfig {
-        endpoint: normalize_config_value(endpoint),
-        model: normalize_config_value(model),
-        allow_dummy_key_endpoints: parsed_dummy_key_allowlist,
+        ollama_host: normalize_config_value(ollama_host),
+        default_model: normalize_config_value(default_model),
+        ask_model: normalize_config_value(ask_model),
+        cmd_model: normalize_config_value(cmd_model),
+        execution_enabled: Some(execution_enabled),
+        legacy_model: None,
     };
 
     if let Some(parent) = path.parent() {
@@ -982,18 +1011,15 @@ fn normalize_config_value(value: String) -> Option<String> {
     }
 }
 
-fn parse_csv_list(value: String) -> Option<Vec<String>> {
-    let values = value
-        .split(',')
-        .map(|part| part.trim())
-        .filter(|part| !part.is_empty())
-        .map(|part| part.to_string())
-        .collect::<Vec<_>>();
-
-    if values.is_empty() {
-        None
-    } else {
-        Some(values)
+fn prompt_bool_config_value(label: &str, current: bool) -> Result<bool> {
+    loop {
+        let current_value = if current { "true" } else { "false" };
+        let input = prompt_config_value(label, Some(current_value), true)?;
+        match input.trim().to_ascii_lowercase().as_str() {
+            "true" | "t" | "yes" | "y" | "1" => return Ok(true),
+            "false" | "f" | "no" | "n" | "0" => return Ok(false),
+            _ => println!("Please enter true/false (or yes/no)."),
+        }
     }
 }
 
@@ -1028,72 +1054,6 @@ fn load_config() -> Result<StoredConfig> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(StoredConfig::default()),
         Err(err) => Err(err.into()),
     }
-}
-
-fn resolve_api_key(endpoint: &str, allow_dummy_key_endpoints: Option<&[String]>) -> Result<String> {
-    if let Ok(key) = env::var("ROSIE_API_KEY") {
-        let trimmed = key.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-
-    if is_local_endpoint(endpoint) || endpoint_in_allowlist(endpoint, allow_dummy_key_endpoints) {
-        // OpenAI-compatible local providers (for example Ollama) may require
-        // a non-empty Authorization header but do not validate the token value.
-        return Ok("ollama".to_string());
-    }
-
-    Err(anyhow!(
-        "ROSIE_API_KEY missing; set the environment variable, use a localhost endpoint, or add the endpoint to allow_dummy_key_endpoints in config.toml"
-    ))
-}
-
-fn is_local_endpoint(endpoint: &str) -> bool {
-    let Some((host, _port)) = parse_endpoint_host_and_port(endpoint) else {
-        return false;
-    };
-
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
-}
-
-fn endpoint_in_allowlist(endpoint: &str, allow_dummy_key_endpoints: Option<&[String]>) -> bool {
-    let Some((host, port)) = parse_endpoint_host_and_port(endpoint) else {
-        return false;
-    };
-
-    let Some(allowlist) = allow_dummy_key_endpoints else {
-        return false;
-    };
-
-    for entry in allowlist {
-        let trimmed = entry.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if let Some((allowed_host, allowed_port)) = parse_endpoint_host_and_port(trimmed)
-            && host.eq_ignore_ascii_case(&allowed_host)
-            && (allowed_port.is_none() || allowed_port == port)
-        {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn parse_endpoint_host_and_port(value: &str) -> Option<(String, Option<u16>)> {
-    let normalized = if value.contains("://") {
-        value.to_string()
-    } else {
-        format!("https://{}", value)
-    };
-
-    let url = reqwest::Url::parse(&normalized).ok()?;
-    let host = url.host_str()?.to_string();
-    let port = url.port();
-    Some((host, port))
 }
 
 fn config_path() -> Result<PathBuf> {

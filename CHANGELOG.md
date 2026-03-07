@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added
+
+- Added `--ask` / `-a` one-shot chat mode and `--cmd` / `-c` command-generation mode as explicit, mutually exclusive runtime modes
+- Added mode-specific config keys `ask_model` and `cmd_model`, plus `execution_enabled` for `--cmd` execute control
+- Added default no-flag runtime path for upcoming TUI entrypoint (current placeholder message)
+
+### Changed
+
+- Replaced `--chat` mode with `--ask`, while keeping command generation under `--cmd`
+- Fixed CLI argument parsing so `--model` works regardless of argument position
+- Switched model discovery to Ollama `/api/tags`
+- Updated `--configure` to prompt for Ollama host and model defaults (`default_model`, `ask_model`, `cmd_model`)
+- Updated README and man page to document `--ask`/`--cmd`, TUI-default entrypoint behavior, and config-only model/host resolution
+
+### Removed
+
+- Removed `.env` loading and runtime environment-variable overrides for host/model selection
+- Removed `dotenvy` dependency
+
 ## 0.6.1
 
 ### Changed

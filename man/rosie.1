@@ -1,88 +1,110 @@
 .TH ROSIE 1
 .SH NAME
-rosie \- generate shell commands from natural-language prompts or answer questions in chat mode
+rosie \- quick chat and command generation with Ollama-backed model selection
 .SH SYNOPSIS
 .B rosie
 [\fIOPTIONS\fR] [\fIPROMPT\fR]...
-.IB --chat,-c
-[ \fI--model MODE\fR | \fI-MODEL=MODE\fR ] [ \fI-PROMPT PROM\fR ]...
+.PP
+.B rosie --ask
+[\fI--model MODEL\fR] [\fIPROMPT\fR]...
+.PP
+.B rosie --cmd
+[\fI--model MODEL\fR] [\fIPROMPT\fR]...
 .SH DESCRIPTION
 .B rosie
-takes a natural-language task description, sends it to an OpenAI-compatible
-chat completion endpoint, and returns the resulting shell command with a short
-summary. Alternatively, when run in
-.I --chat
-mode (or with \fB\-c\fR), it answers general questions naturally without generating commands. Chat mode is non-interactive - the answer is printed once and the program exits.
+supports two explicit non-TUI runtime modes:
+.IP \[bu] 2
+.B --ask
+for one-shot chat responses
+.IP \[bu] 2
+.B --cmd
+for shell command generation with interactive
+.B e/r/q
+review flow
 .PP
-Prompts can be passed as trailing arguments or via standard input. When run in
-an interactive terminal without a prompt argument,
-.B rosie
-asks for one before sending the request. In chat mode, you can re-enter questions
-until quitting.
-.PP
-After showing the generated command and summary, interactive mode offers
-.B execute,
-.B re-enter prompt,
+When run without
+.B --ask
 or
-.B quit.
-Non-interactive mode prints the command and summary and then exits.
+.B --cmd,
+Rosie currently enters the default TUI entrypoint placeholder while full TUI support is under development.
+.PP
+Prompts can be supplied as trailing arguments or from standard input. If neither is provided in an interactive terminal, Rosie prompts for one line of input.
 .SH OPTIONS
 .TP
-.B \-\-configure
-Interactively create or update the local configuration file. The command now performs 
-automatic model discovery after setting the endpoint. When discovered, you can select from 
-available models by number or full ID; if discovery fails, you can choose to
-continue without discovery or exit configuration.
-.TP
-.B \-\-install
-Install the current binary into the local bin directory and install this man
-page into the local man directory when available.
-.TP
-.BI --chat,-c [ \fI--model MODE\fR ]
-Run in chat mode to answer general questions instead of generating shell commands.
-Note: Chat mode is non-interactive - returns a simple text answer without formatting
-or interactive options (no execute, re-enter, or quit). Optional model override (defaults to gpt-4o-mini).
-.TP
-.B \-h, \-\-help
-Print help information.
-.TP
-.IB -V,--version
-Display version information and exit.
-.SH CONFIGURATION
-Rosie reads configuration in this order:
-.IP "1." 4
-Environment variables
-.IP "2." 4
-Local config file at
+.B --configure
+Interactively create or update local configuration in
 .I ~/.config/rosie/config.toml
-.IP "3." 4
-Built-in defaults
+(including Ollama host and model defaults).
+.TP
+.B --install
+Install the current binary into the local bin directory and install this man page into the local man directory.
+.TP
+.BR -a , " --ask"
+Run one-shot chat mode and print the answer once.
+.TP
+.BR -c , " --cmd"
+Run command-generation mode (existing non-TUI flow with execute/re-enter/quit prompt).
+.TP
+.BI --model " MODEL"
+Override model selection for this invocation.
+.TP
+.BR -V , " --version"
+Display version information and exit.
+.TP
+.BR -h , " --help"
+Print help information.
+.SH CONFIGURATION
+Rosie uses file-based configuration for host/model defaults:
+.TP
+.I ~/.config/rosie/config.toml
+(or
+.I ${XDG_CONFIG_HOME}/rosie/config.toml
+when
+.B XDG_CONFIG_HOME
+is set).
 .PP
-Recognized environment variables:
+Supported keys:
 .TP
-.B ROSIE_API_KEY
-API key for the OpenAI-compatible endpoint. Required for non-local endpoints.
-For localhost endpoints, Rosie falls back to a built-in dummy key if unset.
-For remote endpoints, dummy-key fallback applies only when the endpoint is
-allowlisted in
-.I allow_dummy_key_endpoints
-in the config file.
+.B ollama_host
+Ollama base URL (default:
+.I http://localhost:11434 )
 .TP
-.B ROSIE_ENDPOINT
-Base endpoint URL. Defaults to
-.I https://api.openai.com
-.
+.B default_model
+Global model fallback
 .TP
-.B ROSIE_MODEL
-Model name. Defaults to
-.I gpt-4o-mini
-.
+.B ask_model
+Mode-specific default for
+.B --ask
+(optional)
+.TP
+.B cmd_model
+Mode-specific default for
+.B --cmd
+(optional)
+.TP
+.B execution_enabled
+If false, command execution is disabled in
+.B --cmd
+while generation remains available
+.PP
+Model resolution order:
+.IP "1." 4
+.B --model
+.IP "2." 4
+mode-specific default (
+.B ask_model
+or
+.B cmd_model )
+.IP "3." 4
+.B default_model
+.IP "4." 4
+first local Ollama model discovered via
+.I /api/tags
 .SH FILES
 .TP
 .I ~/.config/rosie/config.toml
 Persistent local configuration written by
-.BR rosie " "--configure .
-Stores endpoint URL, model name, and optional dummy-key allowlist entries.
+.BR rosie " --configure" .
 .TP
 .I ~/.local/bin/rosie
 Default install location for the executable when
@@ -90,28 +112,25 @@ Default install location for the executable when
 is unset.
 .TP
 .I ~/.local/share/man/man1/rosie.1
-Default install location for the man page when
+Default install location for this man page when
 .B XDG_DATA_HOME
 is unset.
 .SH EXAMPLES
 .TP
 Configure Rosie:
-.B rosie \-\-configure
+.B rosie --configure
 .TP
 Install Rosie:
-.B rosie \-\-install
+.B rosie --install
 .TP
-Generate a command from arguments:
-.B rosie show me the top 10 processes by memory usage
+Quick chat:
+.B rosie --ask "What's the capital of France?"
 .TP
-Prompt interactively and then choose whether to execute:
-.B rosie
+Generate a command:
+.B rosie --cmd "show top 10 processes by memory"
 .TP
-Run in chat mode for general Q&A:
-.B rosie --chat "What's the capital of France?"
-.TP
-Generate a command from standard input:
-.B echo "list all git branches" | rosie
+Prompt from standard input:
+.B echo "find large files" | rosie --cmd
 .SH EXIT STATUS
 .B rosie
 exits with status 0 on success and non-zero on error.
