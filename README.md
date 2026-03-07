@@ -228,3 +228,10 @@ This project is licensed under the MIT license; see [LICENSE](LICENSE).
 ## Contributing
 
 Pull requests are welcome. Please check the issues tracker and open an issue before starting.
+
+Before opening a PR, run:
+
+```bash
+./scripts/check-command-docs.sh
+./scripts/check-quality.sh
+```

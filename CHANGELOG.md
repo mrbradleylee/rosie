@@ -40,6 +40,7 @@
 - Refactored transcript rendering internals with dedicated helpers for assistant separators, content normalization, non-assistant text rows, and fenced-code block flushing
 - Added transcript rendering unit coverage for assistant separators/markers, fenced-code framing/padding, non-assistant prefix behavior, and markdown line invariants
 - Split `main.rs` concerns into dedicated modules (`cli`, `config`, `install`, `llm`, `paths`) to reduce coupling and keep runtime orchestration in `main.rs`
+- Added guardrail scripts for strict local quality checks (`scripts/check-quality.sh`) and command/docs parity validation (`scripts/check-command-docs.sh`), plus CI workflow wiring
 
 ## 0.7.0
 
