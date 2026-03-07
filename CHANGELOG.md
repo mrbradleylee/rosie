@@ -19,6 +19,7 @@
 - Added `:models` TUI command with a floating model picker that loads available models from Ollama `/api/tags` and applies selection to the active session model
 - Added a command picklist in the `:` panel with keyboard selection (`j`/`k` or arrows) and `Enter` to run
 - Added session-scoped model persistence so each session can keep its own selected model and restore it on session switch/restart
+- Added automatic concise session title generation from the first user message in a new session (improved local heuristic)
 
 ### Changed
 
@@ -42,6 +43,7 @@
 - Updated transcript scroll bounds to use Ratatui rendered line counts, improving bottom-of-chat scrolling for long wrapped output
 - Updated TUI footer help text to a compact set of core actions and moved full key/command guidance into a dedicated help modal (`?` / `:help`)
 - Updated TUI help/docs to remove `:model`, rely on header display plus `:models` for model changes, and document the command-panel picklist
+- Updated sessions list ordering to newest-first
 - Updated sessions pane rendering to include per-session model labels when set
 
 ### Removed

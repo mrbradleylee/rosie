@@ -251,7 +251,7 @@ impl SessionStore {
             FROM sessions s
             LEFT JOIN messages m ON m.session_id = s.id
             GROUP BY s.id
-            ORDER BY s.updated_at DESC, s.id DESC
+            ORDER BY s.id DESC
             ",
         )?;
 
@@ -850,6 +850,7 @@ fn submit_composer_message(app: &mut AppState) {
     }
 
     let user_content = trimmed.to_string();
+    maybe_auto_title_session(app, &user_content);
     if let Err(err) = app
         .store
         .insert_message(app.active_session_id, "user", &user_content)
@@ -901,6 +902,181 @@ fn submit_composer_message(app: &mut AppState) {
     app.transcript_follow = true;
     refresh_sessions(app, Some(app.active_session_id));
     app.status_message = "Sending request to Ollama...".to_string();
+}
+
+fn maybe_auto_title_session(app: &mut AppState, first_user_message: &str) {
+    if !app.messages.is_empty() {
+        return;
+    }
+
+    let has_title = app
+        .sessions
+        .iter()
+        .find(|session| session.id == app.active_session_id)
+        .and_then(|session| session.title.as_deref())
+        .map(|title| !title.trim().is_empty())
+        .unwrap_or(false);
+    if has_title {
+        return;
+    }
+
+    let title = suggest_session_title(first_user_message);
+    if let Err(err) = app
+        .store
+        .rename_session(app.active_session_id, Some(&title))
+    {
+        app.status_message = format!("Failed to auto-title session: {err}");
+        return;
+    }
+    refresh_sessions(app, Some(app.active_session_id));
+}
+
+fn suggest_session_title(message: &str) -> String {
+    const LEADING_FILLERS: &[&str] = &[
+        "please",
+        "can",
+        "could",
+        "would",
+        "you",
+        "help",
+        "me",
+        "i",
+        "need",
+        "want",
+        "to",
+        "summarize",
+        "explain",
+        "tell",
+        "show",
+        "give",
+        "create",
+        "write",
+        "draft",
+        "generate",
+    ];
+    const BODY_STOPWORDS: &[&str] = &[
+        "a",
+        "an",
+        "and",
+        "for",
+        "from",
+        "in",
+        "into",
+        "of",
+        "on",
+        "the",
+        "to",
+        "with",
+        "about",
+        "please",
+        "suggest",
+        "suggestion",
+        "suggestions",
+        "next",
+        "step",
+        "steps",
+    ];
+
+    let first_line = message.lines().next().unwrap_or("").trim();
+    let normalized = first_line
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch.is_whitespace() || ch == '-' || ch == '/' {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let collapsed = normalized
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if collapsed.is_empty() {
+        return "New chat".to_string();
+    }
+
+    let mut words: Vec<&str> = collapsed.split_whitespace().collect();
+    while let Some(word) = words.first() {
+        let lower = word.to_ascii_lowercase();
+        if LEADING_FILLERS.contains(&lower.as_str()) {
+            words.remove(0);
+        } else {
+            break;
+        }
+    }
+    if words.is_empty() {
+        return "New chat".to_string();
+    }
+
+    let mut selected = Vec::new();
+    let mut skipped_tail = false;
+    for word in words {
+        let lower = word.to_ascii_lowercase();
+        if BODY_STOPWORDS.contains(&lower.as_str()) {
+            continue;
+        }
+
+        let token = format_title_token(word);
+        if token.is_empty() {
+            continue;
+        }
+        selected.push(token);
+        if selected.len() >= 6 {
+            skipped_tail = true;
+            break;
+        }
+    }
+
+    if selected.is_empty() {
+        selected = collapsed
+            .split_whitespace()
+            .take(4)
+            .map(format_title_token)
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+
+    let mut title = selected.join(" ");
+    const MAX_LEN: usize = 44;
+    if title.chars().count() > MAX_LEN {
+        title = title.chars().take(MAX_LEN).collect::<String>();
+        while title.ends_with(char::is_whitespace) {
+            title.pop();
+        }
+        skipped_tail = true;
+    }
+
+    if skipped_tail {
+        title.push_str("...");
+    }
+
+    title
+}
+
+fn format_title_token(token: &str) -> String {
+    if token.is_empty() {
+        return String::new();
+    }
+    if token
+        .chars()
+        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+    {
+        return token.to_string();
+    }
+    if token.chars().any(|ch| ch.is_ascii_digit()) {
+        return token.to_string();
+    }
+
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let first = first.to_ascii_uppercase();
+    let rest = chars.as_str().to_ascii_lowercase();
+    format!("{first}{rest}")
 }
 
 fn process_stream_events(app: &mut AppState) {
@@ -1986,5 +2162,59 @@ mod tests {
         }
 
         let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn sessions_list_is_ordered_by_id_descending() {
+        let db_path = temp_db_path("session-order");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open");
+            let first = store
+                .load_or_create_active_session()
+                .expect("load")
+                .session_id;
+            let second = store.create_session().expect("second");
+            let third = store.create_session().expect("third");
+            let list = store.list_sessions().expect("list");
+            let ids: Vec<i64> = list.into_iter().map(|session| session.id).collect();
+            assert_eq!(ids, vec![third, second, first]);
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn auto_titles_new_session_from_first_message() {
+        let db_path = temp_db_path("auto-title");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open");
+            let loaded = store.load_or_create_active_session().expect("load");
+            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+            maybe_auto_title_session(
+                &mut app,
+                "Summarize quarterly revenue trends for 2025 and suggest next steps",
+            );
+
+            let title = app
+                .sessions
+                .iter()
+                .find(|session| session.id == app.active_session_id)
+                .and_then(|session| session.title.clone())
+                .expect("auto title should exist");
+            assert_eq!(title, "Quarterly Revenue Trends 2025");
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn suggest_session_title_is_concise() {
+        let title = suggest_session_title(
+            "This is a very long request that should become a concise title for a session with truncation applied",
+        );
+        assert!(title.len() <= 55);
+        assert!(title.ends_with("..."));
     }
 }
