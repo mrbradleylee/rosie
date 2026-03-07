@@ -26,6 +26,9 @@
 - Added `state.info` and `ui.title_value_alt` theme tokens for richer neutral-semantic theming (e.g., streaming/info states and secondary title values like model)
 - Themed all TUI modal windows (command/session/model/theme/help/confirm) with semantic modal tokens and selectable-row styling from theme files
 - Extended modal content theming to style headings, prompts, warnings/errors, active entries, and help sections via existing semantic theme tokens
+- Updated session startup behavior to restore the persisted last active session when sessions exist, and only create a new session when the local store is empty
+- Added a startup Landing mode with a dedicated title block, chat entry box, and quick command hints (`:session`, `:models`, `:theme`, `Ctrl+P`)
+- Updated session initialization to be lazy from Landing: Rosie now opens without creating a session until chat/model actions require one
 
 ## 0.7.0
 

@@ -140,6 +140,7 @@ impl AppState {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InputMode {
+    Landing,
     Normal,
     Insert,
     CommandPalette,
@@ -202,6 +203,11 @@ impl SessionStore {
 
             CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
                 ON sessions(updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             ",
         )?;
         ensure_sessions_model_column(&conn)?;
@@ -209,18 +215,69 @@ impl SessionStore {
         Ok(Self { conn })
     }
 
+    #[cfg(test)]
     fn load_or_create_active_session(&self) -> Result<LoadedSession> {
-        let session_id = self
-            .conn
+        if let Some(session) = self.load_active_session_if_any()? {
+            return Ok(session);
+        }
+        let session_id = self.create_session()?;
+        self.set_last_active_session_id(session_id)?;
+        self.load_session(session_id)
+    }
+
+    fn load_active_session_if_any(&self) -> Result<Option<LoadedSession>> {
+        if let Some(last_active_id) = self.get_last_active_session_id()?
+            && self.session_exists(last_active_id)?
+        {
+            return self.load_session(last_active_id).map(Some);
+        }
+
+        let Some(session_id) = self.latest_session_id()? else {
+            return Ok(None);
+        };
+        self.set_last_active_session_id(session_id)?;
+        self.load_session(session_id).map(Some)
+    }
+
+    fn latest_session_id(&self) -> Result<Option<i64>> {
+        self.conn
             .query_row(
                 "SELECT id FROM sessions ORDER BY updated_at DESC, id DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )
-            .optional()?
-            .unwrap_or(self.create_session()?);
+            .optional()
+            .map_err(Into::into)
+    }
 
-        self.load_session(session_id)
+    fn session_exists(&self, session_id: i64) -> Result<bool> {
+        let exists = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+            params![session_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(exists != 0)
+    }
+
+    fn get_last_active_session_id(&self) -> Result<Option<i64>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_state WHERE key = 'last_active_session_id'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(value.and_then(|raw| raw.parse::<i64>().ok()))
+    }
+
+    fn set_last_active_session_id(&self, session_id: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO app_state (key, value) VALUES ('last_active_session_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![session_id.to_string()],
+        )?;
+        Ok(())
     }
 
     fn create_session(&self) -> Result<i64> {
@@ -423,12 +480,20 @@ fn run_loop(
     db_path: &Path,
 ) -> Result<()> {
     let store = SessionStore::open(db_path)?;
-    let session = store.load_or_create_active_session()?;
-    let active_model = session.model.clone().unwrap_or_else(|| model.to_string());
     let sessions = store.list_sessions()?;
+    let startup_session = store.load_active_session_if_any()?;
+    let (active_session_id, messages, active_model) = if let Some(session) = startup_session {
+        (
+            session.session_id,
+            session.messages,
+            session.model.unwrap_or_else(|| model.to_string()),
+        )
+    } else {
+        (0, Vec::new(), model.to_string())
+    };
     let selected_session_index = sessions
         .iter()
-        .position(|item| item.id == session.session_id)
+        .position(|item| item.id == active_session_id)
         .unwrap_or(0);
     let mut app = AppState::new(
         host,
@@ -437,11 +502,15 @@ fn run_loop(
         theme_key,
         theme,
         store,
-        session.session_id,
-        session.messages,
+        active_session_id,
+        messages,
         sessions,
         selected_session_index,
     );
+    app.mode = InputMode::Landing;
+    app.status_message =
+        "Welcome to Rosie. Type a message and press Enter to start, or Ctrl+P for commands."
+            .to_string();
 
     loop {
         process_stream_events(&mut app);
@@ -465,6 +534,7 @@ fn run_loop(
                 .split(frame.area());
 
             let mode_label = match app.mode {
+                InputMode::Landing => "LANDING",
                 InputMode::Normal => "NORMAL",
                 InputMode::Insert => "INSERT",
                 InputMode::CommandPalette => "COMMAND",
@@ -475,7 +545,6 @@ fn run_loop(
                 InputMode::ThemeSelect => "THEMES",
                 InputMode::Help => "HELP",
             };
-            let active_title = active_session_title(&app);
             let transcript_active = app.mode == InputMode::Normal;
             let composer_active = app.mode == InputMode::Insert;
             let header = Paragraph::new(format!(
@@ -502,93 +571,208 @@ fn run_loop(
             );
             frame.render_widget(header, root[0]);
 
-            let transcript_inner = root[1].inner(ratatui::layout::Margin {
-                horizontal: 1,
-                vertical: 1,
-            });
-            app.transcript_view_width = transcript_inner.width.max(1) as usize;
-            app.transcript_view_height = transcript_inner.height.max(1) as usize;
-            let transcript_lines = transcript_lines(&app.messages, app.is_busy(), theme);
-            let mut transcript_title_spans = vec![
-                Span::styled(
-                    "Transcript",
-                    Style::default()
-                        .fg(theme.title_label)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" | ", Style::default().fg(theme.title_meta)),
-                Span::styled(active_title, Style::default().fg(theme.title_value)),
-            ];
-            if app.is_busy() {
-                transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
-                transcript_title_spans.push(Span::styled(
-                    "Streaming...",
-                    Style::default().fg(theme.info),
-                ));
-            }
-            let transcript_base = Paragraph::new(transcript_lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(Line::from(transcript_title_spans))
-                        .style(Style::default().bg(theme.highlight_low).fg(theme.text))
-                        .border_style(Style::default().fg(if transcript_active {
-                            theme.border_active
-                        } else {
-                            theme.border
-                        })),
-                )
-                .style(Style::default().bg(theme.highlight_low).fg(theme.text))
-                .wrap(Wrap { trim: false });
-            let total_lines = transcript_base.line_count(app.transcript_view_width as u16);
-            let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
-            app.transcript_max_scroll = max_scroll;
-            if app.transcript_follow {
-                app.transcript_scroll = max_scroll;
-            } else if app.transcript_scroll > max_scroll {
-                app.transcript_scroll = max_scroll;
-            }
-            let transcript = transcript_base.scroll((app.transcript_scroll, 0));
-            frame.render_widget(transcript, root[1]);
+            if app.mode == InputMode::Landing {
+                let landing_space = Rect {
+                    x: root[1].x,
+                    y: root[1].y,
+                    width: root[1].width,
+                    height: root[1].height.saturating_add(root[2].height),
+                };
+                let landing_height = 16u16.min(landing_space.height).max(8);
+                let landing_rect = centered_rect(72, landing_height, landing_space);
+                let landing_layout = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(3)])
+                    .split(landing_rect);
 
-            let composer = Paragraph::new(app.composer_input.as_str())
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(Line::from(vec![
-                            Span::styled(
-                                "Composer",
+                let hero_lines = vec![
+                    Line::styled(
+                        "🤖 Rosie".to_string(),
+                        Style::default()
+                            .fg(theme.title_label)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Line::styled(
+                        "Fast local chat in your terminal.".to_string(),
+                        Style::default().fg(theme.text),
+                    ),
+                    Line::raw(""),
+                    Line::styled(
+                        "Quick commands".to_string(),
+                        Style::default()
+                            .fg(theme.title_value)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Line::styled(
+                        "  :session   open sessions list".to_string(),
+                        Style::default().fg(theme.text),
+                    ),
+                    Line::styled(
+                        "  :models    switch model".to_string(),
+                        Style::default().fg(theme.text),
+                    ),
+                    Line::styled(
+                        "  :theme     switch theme".to_string(),
+                        Style::default().fg(theme.text),
+                    ),
+                    Line::styled(
+                        "  Ctrl+P     open command palette".to_string(),
+                        Style::default().fg(theme.text),
+                    ),
+                ];
+                let hero = Paragraph::new(hero_lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(Line::from(vec![Span::styled(
+                                "Welcome",
                                 Style::default()
                                     .fg(theme.title_label)
                                     .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(" | ", Style::default().fg(theme.title_meta)),
-                            Span::styled("Model:", Style::default().fg(theme.title_meta)),
-                            Span::styled(" ", Style::default().fg(theme.title_meta)),
-                            Span::styled(app.model.clone(), Style::default().fg(theme.title_value_alt)),
-                        ]))
-                        .style(Style::default().bg(theme.surface_alt).fg(theme.text))
-                        .border_style(Style::default().fg(if composer_active {
-                            theme.accent
-                        } else {
-                            theme.border
-                        })),
-                )
-                .style(Style::default().bg(theme.surface_alt).fg(theme.text))
-                .wrap(Wrap { trim: false });
-            frame.render_widget(composer, root[2]);
-            if app.mode == InputMode::Insert {
-                let composer_inner = root[2].inner(ratatui::layout::Margin {
+                            )]))
+                            .style(Style::default().bg(theme.highlight_low).fg(theme.text))
+                            .border_style(Style::default().fg(theme.border_active)),
+                    )
+                    .style(Style::default().bg(theme.highlight_low).fg(theme.text))
+                    .alignment(Alignment::Left)
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(hero, landing_layout[0]);
+
+                let prompt = Paragraph::new(app.composer_input.as_str())
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(Line::from(vec![
+                                Span::styled(
+                                    "Start Chat",
+                                    Style::default()
+                                        .fg(theme.title_label)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                                Span::styled(
+                                    "Enter to apply",
+                                    Style::default().fg(theme.title_value_alt),
+                                ),
+                                Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                                Span::styled("Default:", Style::default().fg(theme.title_meta)),
+                                Span::styled(" ", Style::default().fg(theme.title_meta)),
+                                Span::styled(
+                                    app.default_model.clone(),
+                                    Style::default().fg(theme.title_value_alt),
+                                ),
+                            ]))
+                            .style(Style::default().bg(theme.surface_alt).fg(theme.text))
+                            .border_style(Style::default().fg(theme.accent)),
+                    )
+                    .style(Style::default().bg(theme.surface_alt).fg(theme.text))
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(prompt, landing_layout[2]);
+                let prompt_inner = landing_layout[2].inner(ratatui::layout::Margin {
                     horizontal: 1,
                     vertical: 1,
                 });
                 let cursor_offset = app.composer_input.chars().count() as u16;
                 let cursor_x =
-                    composer_inner.x + cursor_offset.min(composer_inner.width.saturating_sub(1));
-                frame.set_cursor_position((cursor_x, composer_inner.y));
+                    prompt_inner.x + cursor_offset.min(prompt_inner.width.saturating_sub(1));
+                frame.set_cursor_position((cursor_x, prompt_inner.y));
+            } else {
+                let active_title = active_session_title(&app);
+                let transcript_inner = root[1].inner(ratatui::layout::Margin {
+                    horizontal: 1,
+                    vertical: 1,
+                });
+                app.transcript_view_width = transcript_inner.width.max(1) as usize;
+                app.transcript_view_height = transcript_inner.height.max(1) as usize;
+                let transcript_lines = transcript_lines(&app.messages, app.is_busy(), theme);
+                let mut transcript_title_spans = vec![
+                    Span::styled(
+                        "Transcript",
+                        Style::default()
+                            .fg(theme.title_label)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                    Span::styled(active_title, Style::default().fg(theme.title_value)),
+                ];
+                if app.is_busy() {
+                    transcript_title_spans
+                        .push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
+                    transcript_title_spans.push(Span::styled(
+                        "Streaming...",
+                        Style::default().fg(theme.info),
+                    ));
+                }
+                let transcript_base = Paragraph::new(transcript_lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(Line::from(transcript_title_spans))
+                            .style(Style::default().bg(theme.highlight_low).fg(theme.text))
+                            .border_style(Style::default().fg(if transcript_active {
+                                theme.border_active
+                            } else {
+                                theme.border
+                            })),
+                    )
+                    .style(Style::default().bg(theme.highlight_low).fg(theme.text))
+                    .wrap(Wrap { trim: false });
+                let total_lines = transcript_base.line_count(app.transcript_view_width as u16);
+                let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
+                app.transcript_max_scroll = max_scroll;
+                if app.transcript_follow {
+                    app.transcript_scroll = max_scroll;
+                } else if app.transcript_scroll > max_scroll {
+                    app.transcript_scroll = max_scroll;
+                }
+                let transcript = transcript_base.scroll((app.transcript_scroll, 0));
+                frame.render_widget(transcript, root[1]);
+
+                let composer = Paragraph::new(app.composer_input.as_str())
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(Line::from(vec![
+                                Span::styled(
+                                    "Composer",
+                                    Style::default()
+                                        .fg(theme.title_label)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                                Span::styled("Model:", Style::default().fg(theme.title_meta)),
+                                Span::styled(" ", Style::default().fg(theme.title_meta)),
+                                Span::styled(
+                                    app.model.clone(),
+                                    Style::default().fg(theme.title_value_alt),
+                                ),
+                            ]))
+                            .style(Style::default().bg(theme.surface_alt).fg(theme.text))
+                            .border_style(Style::default().fg(if composer_active {
+                                theme.accent
+                            } else {
+                                theme.border
+                            })),
+                    )
+                    .style(Style::default().bg(theme.surface_alt).fg(theme.text))
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(composer, root[2]);
+                if app.mode == InputMode::Insert {
+                    let composer_inner = root[2].inner(ratatui::layout::Margin {
+                        horizontal: 1,
+                        vertical: 1,
+                    });
+                    let cursor_offset = app.composer_input.chars().count() as u16;
+                    let cursor_x =
+                        composer_inner.x + cursor_offset.min(composer_inner.width.saturating_sub(1));
+                    frame.set_cursor_position((cursor_x, composer_inner.y));
+                }
             }
 
             let footer_help = match app.mode {
+                InputMode::Landing => {
+                    "Type message | Enter send | Ctrl+P/: cmd | ?: help | Ctrl+C quit"
+                }
                 InputMode::Normal => {
                     if app.is_busy() {
                         "j/k scroll | i compose (disabled) | : cmd | ?: help | Esc cancel stream | Ctrl+C quit"
@@ -823,6 +1007,38 @@ fn run_loop(
             }
 
             match app.mode {
+                InputMode::Landing => match key.code {
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.mode = InputMode::CommandPalette;
+                        app.command_input.clear();
+                        app.command_selected_index = 0;
+                        app.status_message = "Command palette open.".to_string();
+                    }
+                    KeyCode::Char(':') => {
+                        app.mode = InputMode::CommandPalette;
+                        app.command_input.clear();
+                        app.command_selected_index = 0;
+                        app.status_message = "Command palette open.".to_string();
+                    }
+                    KeyCode::Char('?') => {
+                        app.mode = InputMode::Help;
+                        app.status_message = "Help open.".to_string();
+                    }
+                    KeyCode::Enter => {
+                        submit_composer_message(&mut app);
+                    }
+                    KeyCode::Backspace => {
+                        app.composer_input.pop();
+                    }
+                    KeyCode::Esc => {
+                        app.composer_input.clear();
+                        app.status_message = "Landing input cleared.".to_string();
+                    }
+                    KeyCode::Char(ch) => {
+                        app.composer_input.push(ch);
+                    }
+                    _ => {}
+                },
                 InputMode::Normal => match key.code {
                     KeyCode::PageDown => {
                         let page = app.transcript_view_height as u16;
@@ -882,6 +1098,13 @@ fn run_loop(
                         app.command_selected_index = 0;
                         app.status_message = "Command palette open.".to_string();
                     }
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.pending_g = false;
+                        app.mode = InputMode::CommandPalette;
+                        app.command_input.clear();
+                        app.command_selected_index = 0;
+                        app.status_message = "Command palette open.".to_string();
+                    }
                     KeyCode::Char('?') => {
                         app.pending_g = false;
                         app.mode = InputMode::Help;
@@ -915,7 +1138,7 @@ fn run_loop(
                 },
                 InputMode::CommandPalette => match key.code {
                     KeyCode::Esc => {
-                        app.mode = InputMode::Normal;
+                        app.mode = primary_mode_for_app(&app);
                         app.command_input.clear();
                         app.command_selected_index = 0;
                         app.status_message = "Command cancelled.".to_string();
@@ -946,7 +1169,7 @@ fn run_loop(
                 },
                 InputMode::SessionManager => match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        app.mode = InputMode::Normal;
+                        app.mode = primary_mode_for_app(&app);
                         app.status_message = "Session manager closed.".to_string();
                     }
                     KeyCode::Char('j') | KeyCode::Down => move_session_selection_down(&mut app, 1),
@@ -998,7 +1221,7 @@ fn run_loop(
                         app.mode = if app.delete_return_to_session_manager {
                             InputMode::SessionManager
                         } else {
-                            InputMode::Normal
+                            primary_mode_for_app(&app)
                         };
                         app.delete_return_to_session_manager = false;
                         app.status_message = "Delete cancelled.".to_string();
@@ -1008,7 +1231,7 @@ fn run_loop(
                 InputMode::ModelSelect => match key.code {
                     KeyCode::Esc => {
                         cancel_model_fetch(&mut app);
-                        app.mode = InputMode::Normal;
+                        app.mode = primary_mode_for_app(&app);
                         app.status_message = "Model picker cancelled.".to_string();
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
@@ -1029,7 +1252,7 @@ fn run_loop(
                 },
                 InputMode::ThemeSelect => match key.code {
                     KeyCode::Esc => {
-                        app.mode = InputMode::Normal;
+                        app.mode = primary_mode_for_app(&app);
                         app.status_message = "Theme picker cancelled.".to_string();
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
@@ -1050,7 +1273,7 @@ fn run_loop(
                 },
                 InputMode::Help => match key.code {
                     KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter => {
-                        app.mode = InputMode::Normal;
+                        app.mode = primary_mode_for_app(&app);
                         app.status_message = "Help closed.".to_string();
                     }
                     _ => {}
@@ -1068,12 +1291,13 @@ fn submit_composer_message(app: &mut AppState) {
         return;
     }
 
-    let trimmed = app.composer_input.trim();
-    if trimmed.is_empty() {
+    let user_content = app.composer_input.trim().to_string();
+    if user_content.is_empty() {
         return;
     }
-
-    let user_content = trimmed.to_string();
+    if !ensure_active_session_for_chat(app) {
+        return;
+    }
     maybe_auto_title_session(app, &user_content);
     if let Err(err) = app
         .store
@@ -1125,6 +1349,33 @@ fn submit_composer_message(app: &mut AppState) {
     app.transcript_follow = true;
     refresh_sessions(app, Some(app.active_session_id));
     app.status_message = "Sending request to Ollama...".to_string();
+}
+
+fn ensure_active_session_for_chat(app: &mut AppState) -> bool {
+    if app.active_session_id > 0
+        && app
+            .sessions
+            .iter()
+            .any(|session| session.id == app.active_session_id)
+    {
+        return true;
+    }
+
+    match activate_session_or_create(app, None) {
+        Ok(_) => true,
+        Err(err) => {
+            app.status_message = format!("Failed to initialize session: {err}");
+            false
+        }
+    }
+}
+
+fn primary_mode_for_app(app: &AppState) -> InputMode {
+    if app.active_session_id <= 0 && app.messages.is_empty() {
+        InputMode::Landing
+    } else {
+        InputMode::Normal
+    }
 }
 
 fn maybe_auto_title_session(app: &mut AppState, first_user_message: &str) {
@@ -1685,13 +1936,21 @@ fn switch_to_selected_session(app: &mut AppState) -> bool {
     match app.store.load_session(selected.id) {
         Ok(loaded) => {
             app.active_session_id = selected.id;
+            if let Err(err) = app.store.set_last_active_session_id(selected.id) {
+                app.status_message = format!(
+                    "Switched to session #{}, but failed to persist active session: {err}",
+                    selected.id
+                );
+            }
             app.messages = loaded.messages;
             app.model = loaded.model.unwrap_or_else(|| app.default_model.clone());
             app.composer_input.clear();
             app.transcript_scroll = 0;
             app.transcript_follow = true;
             refresh_sessions(app, Some(selected.id));
-            app.status_message = format!("Switched to session #{}.", selected.id);
+            if !app.status_message.starts_with("Switched to session #") {
+                app.status_message = format!("Switched to session #{}.", selected.id);
+            }
             true
         }
         Err(err) => {
@@ -1708,6 +1967,7 @@ fn activate_session_or_create(
     let sessions = app.store.list_sessions()?;
     if sessions.is_empty() {
         let session_id = app.store.create_session()?;
+        app.store.set_last_active_session_id(session_id)?;
         app.active_session_id = session_id;
         app.messages.clear();
         app.model = app.default_model.clone();
@@ -1730,6 +1990,7 @@ fn activate_session_or_create(
         .unwrap_or(sessions[0].id);
 
     let loaded = app.store.load_session(target_id)?;
+    app.store.set_last_active_session_id(target_id)?;
     app.active_session_id = target_id;
     app.messages = loaded.messages;
     app.model = loaded.model.unwrap_or_else(|| app.default_model.clone());
@@ -1775,6 +2036,12 @@ fn create_and_activate_session(app: &mut AppState) {
 
     match app.store.create_session() {
         Ok(session_id) => {
+            if let Err(err) = app.store.set_last_active_session_id(session_id) {
+                app.status_message = format!(
+                    "Started new session #{}, but failed to persist active session: {err}",
+                    session_id
+                );
+            }
             app.active_session_id = session_id;
             app.messages.clear();
             app.model = app.default_model.clone();
@@ -1782,7 +2049,9 @@ fn create_and_activate_session(app: &mut AppState) {
             app.transcript_scroll = 0;
             app.transcript_follow = true;
             refresh_sessions(app, Some(session_id));
-            app.status_message = format!("Started new session #{}.", session_id);
+            if !app.status_message.starts_with("Started new session #") {
+                app.status_message = format!("Started new session #{}.", session_id);
+            }
         }
         Err(err) => {
             app.status_message = format!("Failed to create session: {err}");
@@ -1893,7 +2162,7 @@ fn confirm_delete_session(app: &mut AppState) {
 
 fn open_model_picker(app: &mut AppState) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-        app.mode = InputMode::Normal;
+        app.mode = primary_mode_for_app(app);
         app.status_message = "Model picker unavailable outside async runtime.".to_string();
         return;
     };
@@ -1928,7 +2197,7 @@ fn open_theme_picker(app: &mut AppState) {
     let config_dir = match config_dir_from_env() {
         Ok(path) => path,
         Err(err) => {
-            app.mode = InputMode::Normal;
+            app.mode = primary_mode_for_app(app);
             app.status_message = format!("Theme picker unavailable: {err}");
             return;
         }
@@ -1970,6 +2239,9 @@ fn apply_selected_model(app: &mut AppState) {
         app.status_message = "No model selected.".to_string();
         return;
     };
+    if !ensure_active_session_for_chat(app) {
+        return;
+    }
 
     match app
         .store
@@ -1978,7 +2250,7 @@ fn apply_selected_model(app: &mut AppState) {
         Ok(()) => {
             app.model = selected.clone();
             refresh_sessions(app, Some(app.active_session_id));
-            app.mode = InputMode::Normal;
+            app.mode = primary_mode_for_app(app);
             app.status_message = format!("Session model set to {selected}");
         }
         Err(err) => {
@@ -2010,7 +2282,7 @@ fn apply_selected_theme(app: &mut AppState) {
 
     app.theme = resolved.palette;
     app.theme_key = resolved.key.clone();
-    app.mode = InputMode::Normal;
+    app.mode = primary_mode_for_app(app);
     match persist_theme_config(&resolved.key) {
         Ok(()) => {
             app.status_message = format!("Theme set to {}.", resolved.key);
@@ -2860,6 +3132,9 @@ mod tests {
             store
                 .insert_message(session_two, "user", "hello from session two")
                 .expect("insert second session message");
+            store
+                .set_last_active_session_id(session_two)
+                .expect("persist active session");
         }
 
         {
@@ -3031,18 +3306,18 @@ mod tests {
             app.selected_session_index = app
                 .sessions
                 .iter()
-                .position(|session| session.id == session_one)
-                .expect("find session one");
-            switch_to_selected_session(&mut app);
-            assert_eq!(app.model, "qwen2.5-coder");
-
-            app.selected_session_index = app
-                .sessions
-                .iter()
                 .position(|session| session.id == session_two)
                 .expect("find session two");
             switch_to_selected_session(&mut app);
             assert_eq!(app.model, "llama3.2");
+
+            app.selected_session_index = app
+                .sessions
+                .iter()
+                .position(|session| session.id == session_one)
+                .expect("find session one");
+            switch_to_selected_session(&mut app);
+            assert_eq!(app.model, "qwen2.5-coder");
         }
 
         let _ = fs::remove_file(&db_path);
@@ -3063,6 +3338,46 @@ mod tests {
             let list = store.list_sessions().expect("list");
             let ids: Vec<i64> = list.into_iter().map(|session| session.id).collect();
             assert_eq!(ids, vec![third, second, first]);
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn startup_uses_last_active_session_or_creates_when_empty() {
+        let db_path = temp_db_path("startup-last-active");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open");
+            let first = store
+                .load_or_create_active_session()
+                .expect("load/create first")
+                .session_id;
+            let second = store.create_session().expect("create second");
+
+            store
+                .set_last_active_session_id(second)
+                .expect("persist second active");
+            let loaded = store.load_or_create_active_session().expect("load second");
+            assert_eq!(loaded.session_id, second);
+
+            store
+                .set_last_active_session_id(first)
+                .expect("persist first active");
+            let loaded = store.load_or_create_active_session().expect("load first");
+            assert_eq!(loaded.session_id, first);
+        }
+
+        {
+            let empty_db_path = temp_db_path("startup-empty-creates");
+            let store = SessionStore::open(&empty_db_path).expect("open empty");
+            let loaded = store
+                .load_or_create_active_session()
+                .expect("create on empty");
+            assert!(loaded.session_id > 0);
+            let list = store.list_sessions().expect("list");
+            assert_eq!(list.len(), 1);
+            let _ = fs::remove_file(&empty_db_path);
         }
 
         let _ = fs::remove_file(&db_path);
