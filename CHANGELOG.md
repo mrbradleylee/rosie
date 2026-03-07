@@ -6,7 +6,9 @@
 
 - Added `--ask` / `-a` one-shot chat mode and `--cmd` / `-c` command-generation mode as explicit, mutually exclusive runtime modes
 - Added mode-specific config keys `ask_model` and `cmd_model`, plus `execution_enabled` for `--cmd` execute control
-- Added default no-flag runtime path for upcoming TUI entrypoint (current placeholder message)
+- Added default no-flag runtime path that launches a minimal TUI shell scaffold
+- Added local-only composer/transcript interaction in the TUI scaffold with explicit `Normal`/`Insert` modes, `i` to enter input, and `Esc` to return to normal
+- Added floating `:` command panel in the TUI scaffold with initial command handling (`:quit`)
 
 ### Changed
 

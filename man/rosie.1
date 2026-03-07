@@ -26,7 +26,30 @@ When run without
 .B --ask
 or
 .B --cmd,
-Rosie currently enters the default TUI entrypoint placeholder while full TUI support is under development.
+Rosie launches a minimal TUI shell scaffold while full TUI support is under development.
+In the scaffold, Rosie starts in
+.B Normal
+mode. Press
+.B i
+to enter
+.B Insert
+mode, where composer input is local-only;
+.B Enter
+appends it to transcript and
+.B Backspace
+edits input. Press
+.B Esc
+to return to
+.B Normal
+mode. Press
+.B :
+in
+.B Normal
+to open the floating command panel (for example,
+.B :quit
+). Use
+.B Ctrl+C
+to quit from any mode.
 .PP
 Prompts can be supplied as trailing arguments or from standard input. If neither is provided in an interactive terminal, Rosie prompts for one line of input.
 .SH OPTIONS

@@ -13,6 +13,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 env_logger = "0.10"
+ratatui = "0.29"
+crossterm = "0.28"
 
 [package.metadata.release]
 allow-branch = ["main"]

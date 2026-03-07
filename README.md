@@ -4,7 +4,7 @@ Rosie is a Rust CLI that can either:
 - run quick one-shot chat (`--ask`), or
 - generate shell commands (`--cmd`) with an interactive execute/re-enter/quit loop.
 
-Running `rosie` with no mode flag currently enters the default TUI entrypoint placeholder while the full chat TUI is under development.
+Running `rosie` with no mode flag launches a minimal TUI shell scaffold (sessions/transcript/composer panes) while full chat functionality is under development.
 
 ## Features
 
@@ -40,7 +40,7 @@ By default Rosie installs itself into `~/.local/bin/rosie` (or `$XDG_BIN_HOME/ro
 ## Usage
 
 ```bash
-# Default entrypoint (TUI placeholder for now)
+# Default entrypoint (minimal TUI shell)
 rosie
 
 # Configure Ollama host and model defaults
@@ -71,6 +71,14 @@ In `--cmd` mode on interactive terminals, Rosie prints a generated command + sum
 ```
 
 In `--ask` mode, Rosie prints the model response once and exits.
+
+In the default TUI scaffold:
+- `Normal` mode starts by default
+- press `i` to enter `Insert` mode
+- in `Insert`, type in the composer, use `Backspace` to edit, and press `Enter` to append a local transcript message
+- press `Esc` to return to `Normal`
+- press `:` in `Normal` to open the floating command panel, then run commands like `:quit`
+- `Ctrl+C` quits from any mode
 
 ## Configuration
 

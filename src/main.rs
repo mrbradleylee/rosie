@@ -1,4 +1,6 @@
 // src/main.rs
+mod tui;
+
 use anyhow::{Result, anyhow};
 use log::info;
 use serde::{Deserialize, Serialize};
@@ -78,7 +80,7 @@ async fn main() -> Result<()> {
     let runtime_model = args.model.clone();
 
     if !args.ask_mode && !args.cmd_mode {
-        launch_tui_placeholder()?;
+        launch_tui(args.model.as_deref())?;
         return Ok(());
     }
 
@@ -118,9 +120,19 @@ async fn main() -> Result<()> {
     }
 }
 
-fn launch_tui_placeholder() -> Result<()> {
-    println!("Rosie TUI is planned but not implemented yet.");
-    println!("Use `rosie --ask \"...\"` for quick chat or `rosie --cmd \"...\"` for command mode.");
+fn launch_tui(runtime_model: Option<&str>) -> Result<()> {
+    let config = load_config()?;
+    let host = config
+        .ollama_host
+        .as_deref()
+        .unwrap_or(DEFAULT_OLLAMA_HOST)
+        .to_string();
+    let model = runtime_model
+        .map(str::to_owned)
+        .or_else(|| config.effective_default_model())
+        .unwrap_or_else(|| "(auto from Ollama /api/tags)".to_string());
+
+    tui::run(&host, &model)?;
     Ok(())
 }
 
