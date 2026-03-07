@@ -48,6 +48,7 @@ struct AppState {
     transcript_follow: bool,
     transcript_view_width: usize,
     transcript_view_height: usize,
+    transcript_max_scroll: u16,
     pending_g: bool,
     pending_d: bool,
     in_flight: Option<InFlightRequest>,
@@ -86,6 +87,7 @@ impl AppState {
             transcript_follow: true,
             transcript_view_width: 1,
             transcript_view_height: 1,
+            transcript_max_scroll: 0,
             pending_g: false,
             pending_d: false,
             in_flight: None,
@@ -399,18 +401,11 @@ fn run_loop(
             frame.render_widget(sessions, body[0]);
 
             let transcript_rows = transcript_rows(&app.messages);
-            let total_lines = total_wrapped_lines(&transcript_rows, app.transcript_view_width);
-            let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
-            if app.transcript_follow {
-                app.transcript_scroll = max_scroll;
-            } else if app.transcript_scroll > max_scroll {
-                app.transcript_scroll = max_scroll;
-            }
             let transcript_lines: Vec<Line<'_>> = transcript_rows
                 .iter()
                 .map(|row| Line::from(row.as_str()))
                 .collect();
-            let transcript = Paragraph::new(transcript_lines)
+            let transcript_base = Paragraph::new(transcript_lines)
                 .block(Block::default().borders(Borders::ALL).title(format!(
                     "Transcript{}",
                     if app.normal_focus == NormalFocus::Transcript {
@@ -419,14 +414,32 @@ fn run_loop(
                         ""
                     }
                 )))
-                .wrap(Wrap { trim: false })
-                .scroll((app.transcript_scroll, 0));
+                .wrap(Wrap { trim: false });
+            let total_lines = transcript_base.line_count(app.transcript_view_width as u16);
+            let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
+            app.transcript_max_scroll = max_scroll;
+            if app.transcript_follow {
+                app.transcript_scroll = max_scroll;
+            } else if app.transcript_scroll > max_scroll {
+                app.transcript_scroll = max_scroll;
+            }
+            let transcript = transcript_base.scroll((app.transcript_scroll, 0));
             frame.render_widget(transcript, body[1]);
 
             let composer = Paragraph::new(app.composer_input.as_str())
                 .block(Block::default().borders(Borders::ALL).title("Composer"))
                 .wrap(Wrap { trim: false });
             frame.render_widget(composer, root[2]);
+            if app.mode == InputMode::Insert {
+                let composer_inner = root[2].inner(ratatui::layout::Margin {
+                    horizontal: 1,
+                    vertical: 1,
+                });
+                let cursor_offset = app.composer_input.chars().count() as u16;
+                let cursor_x =
+                    composer_inner.x + cursor_offset.min(composer_inner.width.saturating_sub(1));
+                frame.set_cursor_position((cursor_x, composer_inner.y));
+            }
 
             let footer_help = match app.mode {
                 InputMode::Normal => {
@@ -785,6 +798,7 @@ fn submit_composer_message(app: &mut AppState) {
         assistant_message_id,
     });
     app.mode = InputMode::Normal;
+    app.normal_focus = NormalFocus::Transcript;
     app.transcript_follow = true;
     refresh_sessions(app, Some(app.active_session_id));
     app.status_message = "Sending request to Ollama...".to_string();
@@ -1042,6 +1056,7 @@ fn switch_to_selected_session(app: &mut AppState) {
             app.composer_input.clear();
             app.transcript_scroll = 0;
             app.transcript_follow = true;
+            app.normal_focus = NormalFocus::Transcript;
             refresh_sessions(app, Some(selected.id));
             app.status_message = format!("Switched to session #{}.", selected.id);
         }
@@ -1083,6 +1098,7 @@ fn activate_session_or_create(
     app.composer_input.clear();
     app.transcript_scroll = 0;
     app.transcript_follow = true;
+    app.normal_focus = NormalFocus::Transcript;
     refresh_sessions(app, Some(target_id));
     Ok(target_id)
 }
@@ -1238,19 +1254,6 @@ fn transcript_rows(messages: &[ChatMessage]) -> Vec<String> {
     rows
 }
 
-fn total_wrapped_lines(rows: &[String], width: usize) -> usize {
-    rows.iter().map(|row| wrapped_line_count(row, width)).sum()
-}
-
-fn wrapped_line_count(text: &str, width: usize) -> usize {
-    if width == 0 {
-        return 1;
-    }
-    let chars = text.chars().count();
-    let len = chars.max(1);
-    len.div_ceil(width)
-}
-
 fn max_scroll_for_view(total_lines: usize, view_height: usize) -> u16 {
     total_lines
         .saturating_sub(view_height)
@@ -1258,12 +1261,9 @@ fn max_scroll_for_view(total_lines: usize, view_height: usize) -> u16 {
 }
 
 fn scroll_transcript_down(app: &mut AppState, lines: u16) {
-    let rows = transcript_rows(&app.messages);
-    let total_lines = total_wrapped_lines(&rows, app.transcript_view_width);
-    let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
     let next = app.transcript_scroll.saturating_add(lines);
-    app.transcript_scroll = next.min(max_scroll);
-    app.transcript_follow = app.transcript_scroll >= max_scroll;
+    app.transcript_scroll = next.min(app.transcript_max_scroll);
+    app.transcript_follow = app.transcript_scroll >= app.transcript_max_scroll;
 }
 
 fn scroll_transcript_up(app: &mut AppState, lines: u16) {
@@ -1278,10 +1278,7 @@ fn scroll_transcript_to_top(app: &mut AppState) {
 }
 
 fn scroll_transcript_to_bottom(app: &mut AppState) {
-    let rows = transcript_rows(&app.messages);
-    let total_lines = total_wrapped_lines(&rows, app.transcript_view_width);
-    let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
-    app.transcript_scroll = max_scroll;
+    app.transcript_scroll = app.transcript_max_scroll;
     app.transcript_follow = true;
     app.status_message = "Transcript: bottom".to_string();
 }
@@ -1483,6 +1480,7 @@ fn run_palette_command(app: &mut AppState) -> bool {
                         app.composer_input.clear();
                         app.transcript_scroll = 0;
                         app.transcript_follow = true;
+                        app.normal_focus = NormalFocus::Transcript;
                         refresh_sessions(app, Some(session_id));
                         app.status_message = format!("Started new session #{}.", session_id);
                     }
