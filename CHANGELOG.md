@@ -31,6 +31,7 @@
 - Updated session initialization to be lazy from Landing: Rosie now opens without creating a session until chat/model actions require one
 - Removed unused `sessions.is_archived` from the local TUI schema for new databases
 - Added first-pass fenced code block rendering in transcript with framed rails/gutter and language-aware syntax highlighting via `syntect` (with plain-style fallback)
+- Added transcript navigation UX improvements: `[ / ]` jumps between assistant blocks, conversation title scroll-position indicator, and off-follow hints for older/newer messages
 
 ## 0.7.0
 

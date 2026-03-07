@@ -65,6 +65,7 @@ struct AppState {
     transcript_view_width: usize,
     transcript_view_height: usize,
     transcript_max_scroll: u16,
+    transcript_assistant_markers: Vec<u16>,
     pending_g: bool,
     in_flight: Option<InFlightRequest>,
     model_fetch: Option<InFlightModelFetch>,
@@ -115,6 +116,7 @@ impl AppState {
             transcript_view_width: 1,
             transcript_view_height: 1,
             transcript_max_scroll: 0,
+            transcript_assistant_markers: Vec::new(),
             pending_g: false,
             in_flight: None,
             model_fetch: None,
@@ -707,20 +709,34 @@ fn run_loop(
                 });
                 app.transcript_view_width = transcript_inner.width.max(1) as usize;
                 app.transcript_view_height = transcript_inner.height.max(1) as usize;
-                let transcript_lines = transcript_lines(
+                let transcript_render = transcript_lines(
                     &app.messages,
                     app.is_busy(),
                     theme,
                     app.transcript_view_width,
                 );
+                app.transcript_assistant_markers = transcript_render.assistant_markers;
                 let conversation_title = conversation_header_title(&app);
-                let transcript_title_spans = vec![Span::styled(
+                let mut transcript_title_spans = vec![Span::styled(
                     conversation_title,
                     Style::default()
                         .fg(theme.title_label)
                         .add_modifier(Modifier::BOLD),
                 )];
-                let transcript_base = Paragraph::new(transcript_lines)
+                transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
+                transcript_title_spans.push(Span::styled(
+                    transcript_position_label(app.transcript_scroll, app.transcript_max_scroll),
+                    Style::default().fg(theme.title_meta),
+                ));
+                if !app.transcript_follow && app.transcript_scroll > 0 {
+                    transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
+                    transcript_title_spans.push(Span::styled("↑ older", Style::default().fg(theme.muted)));
+                }
+                if !app.transcript_follow && app.transcript_scroll < app.transcript_max_scroll {
+                    transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
+                    transcript_title_spans.push(Span::styled("↓ new", Style::default().fg(theme.success)));
+                }
+                let transcript_base = Paragraph::new(transcript_render.lines)
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
@@ -789,14 +805,12 @@ fn run_loop(
             }
 
             let footer_help = match app.mode {
-                InputMode::Landing => {
-                    "Type message | Enter send | Ctrl+P/: cmd | ?: help | Ctrl+C quit"
-                }
+                InputMode::Landing => "Type message | Enter send | Ctrl+P/: cmd | ?: help",
                 InputMode::Normal => {
                     if app.is_busy() {
-                        "j/k scroll | i compose (disabled) | : cmd | ?: help | Esc cancel stream | Ctrl+C quit"
+                        "[/] assistant jump | i compose (disabled) | : cmd | ?: help | Esc cancel stream"
                     } else {
-                        "j/k scroll | i compose | : cmd | ?: help | Ctrl+C quit"
+                        "[/] assistant jump | i compose | : cmd | ?: help"
                     }
                 }
                 InputMode::Insert => "Enter: send | Backspace: edit | Esc: normal",
@@ -810,7 +824,15 @@ fn run_loop(
                 InputMode::ThemeSelect => "Theme picker: j/k move | Enter select | Esc cancel",
                 InputMode::Help => "Help: Esc/q/? close",
             };
-            let footer = Paragraph::new(format!("{} | {}", footer_help, app.status_message))
+            let footer_width = root[3].width as usize;
+            let footer_text = responsive_footer_text(
+                app.mode,
+                app.is_busy(),
+                footer_help,
+                &app.status_message,
+                footer_width,
+            );
+            let footer = Paragraph::new(footer_text)
                 .style(
                     Style::default()
                         .bg(theme.highlight_mid)
@@ -1085,6 +1107,14 @@ fn run_loop(
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         let half_page = (app.transcript_view_height / 2).max(1) as u16;
                         scroll_transcript_up(&mut app, half_page);
+                        app.pending_g = false;
+                    }
+                    KeyCode::Char(']') => {
+                        jump_to_next_assistant_block(&mut app);
+                        app.pending_g = false;
+                    }
+                    KeyCode::Char('[') => {
+                        jump_to_prev_assistant_block(&mut app);
                         app.pending_g = false;
                     }
                     KeyCode::Char('G') => {
@@ -2367,6 +2397,7 @@ fn help_rows() -> Vec<String> {
     vec![
         "Navigation".to_string(),
         "  j/k or arrows: scroll transcript".to_string(),
+        "  [ / ]: previous / next assistant block".to_string(),
         "  PageUp/PageDown: full-page scroll".to_string(),
         "  Ctrl+u / Ctrl+d: half-page scroll".to_string(),
         "  gg / G: top / bottom in transcript".to_string(),
@@ -2671,20 +2702,29 @@ fn run_palette_selected_command(app: &mut AppState) -> bool {
     run_palette_command(app)
 }
 
+struct TranscriptRender {
+    lines: Vec<Line<'static>>,
+    assistant_markers: Vec<u16>,
+}
+
 fn transcript_lines(
     messages: &[ChatMessage],
     is_busy: bool,
     theme: ThemePalette,
     _view_width: usize,
-) -> Vec<Line<'static>> {
+) -> TranscriptRender {
     if messages.is_empty() {
-        return vec![Line::styled(
-            "No messages yet. Press i, type, then Enter.".to_string(),
-            Style::default().fg(theme.muted),
-        )];
+        return TranscriptRender {
+            lines: vec![Line::styled(
+                "No messages yet. Press i, type, then Enter.".to_string(),
+                Style::default().fg(theme.muted),
+            )],
+            assistant_markers: Vec::new(),
+        };
     }
 
     let mut rows = Vec::new();
+    let mut assistant_markers = Vec::new();
     for (idx, message) in messages.iter().enumerate() {
         let (label, label_color) = match message.role.as_str() {
             "user" => ("You", theme.user),
@@ -2703,6 +2743,7 @@ fn transcript_lines(
 
         if is_assistant {
             rows.push(Line::raw(""));
+            assistant_markers.push(rows.len() as u16);
             rows.push(Line::from(vec![
                 Span::styled(
                     "──────────────── ".to_string(),
@@ -2885,7 +2926,10 @@ fn transcript_lines(
         }
         rows.push(Line::raw(""));
     }
-    rows
+    TranscriptRender {
+        lines: rows,
+        assistant_markers,
+    }
 }
 fn status_color(message: &str, theme: ThemePalette) -> Color {
     let lower = message.to_ascii_lowercase();
@@ -2963,6 +3007,57 @@ fn highlighted_code_spans(
         .collect()
 }
 
+fn responsive_footer_text(
+    mode: InputMode,
+    is_busy: bool,
+    full_help: &str,
+    status: &str,
+    width: usize,
+) -> String {
+    let help = if width < 80 {
+        compact_footer_help(mode, is_busy)
+    } else {
+        full_help.to_string()
+    };
+    if width == 0 {
+        return String::new();
+    }
+    let combined = format!("{help} | {status}");
+    truncate_with_ellipsis(&combined, width)
+}
+
+fn compact_footer_help(mode: InputMode, is_busy: bool) -> String {
+    match mode {
+        InputMode::Landing => "Enter send | Ctrl+P cmd".to_string(),
+        InputMode::Normal => {
+            if is_busy {
+                "[/] jump | Esc cancel".to_string()
+            } else {
+                "[/] jump | i compose".to_string()
+            }
+        }
+        InputMode::Insert => "Enter send | Esc normal".to_string(),
+        InputMode::CommandPalette => "j/k pick | Enter run".to_string(),
+        InputMode::SessionManager => "j/k move | Enter apply".to_string(),
+        InputMode::SessionRename => "Type title | Enter save".to_string(),
+        InputMode::ConfirmDelete => "Enter/y yes | n/Esc no".to_string(),
+        InputMode::ModelSelect => "j/k move | Enter select".to_string(),
+        InputMode::ThemeSelect => "j/k move | Enter select".to_string(),
+        InputMode::Help => "Esc/q/? close".to_string(),
+    }
+}
+
+fn transcript_position_label(scroll: u16, max_scroll: u16) -> String {
+    if max_scroll == 0 {
+        return "1/1".to_string();
+    }
+    format!(
+        "{}/{}",
+        scroll.saturating_add(1),
+        max_scroll.saturating_add(1)
+    )
+}
+
 fn max_scroll_for_view(total_lines: usize, view_height: usize) -> u16 {
     total_lines
         .saturating_sub(view_height)
@@ -2990,6 +3085,36 @@ fn scroll_transcript_to_bottom(app: &mut AppState) {
     app.transcript_scroll = app.transcript_max_scroll;
     app.transcript_follow = true;
     app.status_message = "Transcript: bottom".to_string();
+}
+
+fn jump_to_next_assistant_block(app: &mut AppState) {
+    let Some(target) = app
+        .transcript_assistant_markers
+        .iter()
+        .copied()
+        .find(|marker| *marker > app.transcript_scroll)
+    else {
+        app.status_message = "No newer assistant block.".to_string();
+        return;
+    };
+    app.transcript_scroll = target.min(app.transcript_max_scroll);
+    app.transcript_follow = app.transcript_scroll >= app.transcript_max_scroll;
+    app.status_message = "Jumped to next assistant block.".to_string();
+}
+
+fn jump_to_prev_assistant_block(app: &mut AppState) {
+    let Some(target) = app
+        .transcript_assistant_markers
+        .iter()
+        .copied()
+        .rfind(|marker| *marker < app.transcript_scroll)
+    else {
+        app.status_message = "No previous assistant block.".to_string();
+        return;
+    };
+    app.transcript_scroll = target.min(app.transcript_max_scroll);
+    app.transcript_follow = false;
+    app.status_message = "Jumped to previous assistant block.".to_string();
 }
 
 #[derive(Serialize)]
