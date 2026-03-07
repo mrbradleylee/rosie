@@ -764,10 +764,8 @@ fn run_loop(
                                         .add_modifier(Modifier::BOLD),
                                 ),
                                 Span::styled(" | ", Style::default().fg(theme.title_meta)),
-                                Span::styled("Model:", Style::default().fg(theme.title_meta)),
-                                Span::styled(" ", Style::default().fg(theme.title_meta)),
                                 Span::styled(
-                                    app.model.clone(),
+                                    format!("[{}]", app.model),
                                     Style::default()
                                         .fg(theme.title_value_alt)
                                         .add_modifier(Modifier::BOLD),
@@ -830,18 +828,18 @@ fn run_loop(
             let mut footer_spans = vec![Span::styled(
                 format!("[{mode_chip}] "),
                 Style::default()
-                    .bg(theme.highlight_mid)
+                    .bg(theme.surface_alt)
                     .fg(status_mode_color(app.mode, theme))
                     .add_modifier(Modifier::BOLD),
             )];
             footer_spans.push(Span::styled(compact_help, Style::default().fg(theme.text)));
-            footer_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
+            footer_spans.push(Span::styled(" | ", Style::default().fg(theme.highlight_mid)));
             footer_spans.push(Span::styled(
                 status_text.clone(),
                 Style::default().fg(theme.text),
             ));
             let footer = Paragraph::new(Line::from(footer_spans))
-                .style(Style::default().bg(theme.highlight_mid).fg(theme.text));
+                .style(Style::default().bg(theme.surface_alt).fg(theme.text));
             frame.render_widget(footer, root[3]);
 
             if app.mode == InputMode::CommandPalette {
