@@ -3773,7 +3773,7 @@ fn tui_config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::{default_theme, discover_config_theme_names, resolve_theme};
+    use crate::theme::{DEFAULT_THEME_KEY, default_theme, resolve_theme};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -3973,9 +3973,14 @@ mod tests {
     fn theme_command_switches_theme_in_memory() {
         let db_path = temp_db_path("palette-theme");
         let config_dir = config_dir_from_env().expect("config dir");
-        let names = discover_config_theme_names(&config_dir);
-        let first = names.first().map(String::as_str).unwrap_or("theme-a");
-        let second = names.get(1).map(String::as_str).unwrap_or(first);
+        let first = DEFAULT_THEME_KEY;
+        let second = if resolve_theme("rose-pine-moon", &config_dir).is_ok() {
+            "rose-pine-moon"
+        } else if resolve_theme("rose-pine-dawn", &config_dir).is_ok() {
+            "rose-pine-dawn"
+        } else {
+            DEFAULT_THEME_KEY
+        };
 
         {
             let store = SessionStore::open(&db_path).expect("open store");
