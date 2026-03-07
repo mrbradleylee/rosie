@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
         #[arg(value_name = "PROMPT")]
         prompt: Vec<String>,
 
-        /// Display version information (short form: -v)
+        /// Display version information (short form: -V)
         #[arg(short = 'V', long)]
         version: bool,
     }

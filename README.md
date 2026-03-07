@@ -4,7 +4,7 @@ Rosie is a Rust CLI that can either:
 - run quick one-shot chat (`--ask`), or
 - generate shell commands (`--cmd`) with an interactive execute/re-enter/quit loop.
 
-Running `rosie` with no mode flag launches the full-screen TUI chat interface (sessions/transcript/composer panes).
+Running `rosie` with no mode flag launches the full-screen TUI chat interface (landing screen, then conversation/chat panes).
 
 ## Features
 
@@ -76,18 +76,22 @@ In `--cmd` mode on interactive terminals, Rosie prints a generated command + sum
 In `--ask` mode, Rosie prints the model response once and exits.
 
 In the default TUI:
-- `Normal` mode starts by default
+- startup opens a centered landing screen with a `Start Chat` input
+- from landing, type and press `Enter` to begin chatting, use `Ctrl+P`/`:` for command palette, and `F1` for help
+- once in chat, `Normal` mode is active by default
 - press `i` to enter `Insert` mode
 - in `Insert`, type in the composer, use `Backspace` to edit, and press `Enter` to send to Ollama
 - press `Esc` to return to `Normal`
 - assistant tokens stream into transcript as they arrive
 - use `j`/`k` (or arrow keys) in `Normal` to scroll transcript
+- use `[`/`]` in `Normal` to jump between assistant response blocks
 - use `PageUp`/`PageDown` for full-page scroll and `Ctrl+u`/`Ctrl+d` for half-page scroll
 - use `gg` to jump to top and `G` to jump to bottom of transcript
-- header shows the active session title/id
+- top status shows current session + streaming state
 - new sessions auto-title from the first user message (local heuristic first, then model-refined when available)
+- if existing sessions are present, Rosie restores the last active session on launch; if none exist, Rosie creates one when chat starts
 - press `?` in `Normal` (or run `:help`) to open the full key/command help panel
-- press `:` in `Normal` to open the floating command panel, then run:
+- press `:` or `Ctrl+P` to open the floating command panel, then run:
   - `:help`
   - `:session` (open session manager modal)
   - `:models` (open model picker from Ollama `/api/tags` for the active session)
@@ -103,6 +107,7 @@ In the default TUI:
 - `Ctrl+C` quits from any mode
 
 Transcript and composer text are wrapped to pane width so output stays constrained to visible layout bounds.
+Assistant output includes lightweight markdown rendering (headings/lists/quotes/rules/inline emphasis/code/links) and fenced code blocks are framed and syntax-highlighted when possible.
 TUI sessions/messages are persisted in local SQLite at:
 - `${XDG_DATA_HOME}/rosie/sessions.sqlite3` (when `XDG_DATA_HOME` is set)
 - `~/.local/share/rosie/sessions.sqlite3` (fallback)
