@@ -531,17 +531,51 @@ fn run_loop(
                 InputMode::ThemeSelect => "THEMES",
                 InputMode::Help => "HELP",
             };
+            let header_session_title = if app.active_session_id > 0 {
+                active_session_title(&app)
+            } else {
+                "New chat".to_string()
+            };
+            let is_streaming = app.is_busy();
+            let streaming_label = streaming_status_label(is_streaming);
+            let streaming_color = if is_streaming {
+                theme.warn
+            } else {
+                theme.success
+            };
+            let mode_color = status_mode_color(app.mode, theme);
+            let mode_width = mode_label.chars().count();
+            let stream_width = streaming_label.chars().count();
+            let fixed_width = "Mode: ".chars().count() + mode_width + " | ".chars().count()
+                + " | ".chars().count()
+                + stream_width;
+            let max_width = root[0].width.saturating_sub(2) as usize;
+            let session_max = max_width.saturating_sub(fixed_width);
+            let header_session = truncate_with_ellipsis(&header_session_title, session_max);
+            let header_line = Line::from(vec![
+                Span::styled("Mode: ", Style::default().fg(theme.title_meta)),
+                Span::styled(
+                    mode_label.to_string(),
+                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                Span::styled(
+                    header_session,
+                    Style::default()
+                        .fg(theme.title_value)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                Span::styled(streaming_label, Style::default().fg(streaming_color)),
+            ]);
             let transcript_active = app.mode == InputMode::Normal;
             let composer_active = app.mode == InputMode::Insert;
-            let header = Paragraph::new(format!(
-                "🤖 Rosie | Mode: {mode_label}{}",
-                if app.is_busy() { " | Streaming..." } else { "" }
-            ))
+            let header = Paragraph::new(header_line)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(Line::from(vec![Span::styled(
-                        "Status",
+                        "🤖 Rosie",
                         Style::default()
                             .fg(theme.title_label)
                             .add_modifier(Modifier::BOLD),
@@ -663,7 +697,6 @@ fn run_loop(
                     prompt_inner.x + cursor_offset.min(prompt_inner.width.saturating_sub(1));
                 frame.set_cursor_position((cursor_x, prompt_inner.y));
             } else {
-                let active_title = active_session_title(&app);
                 let transcript_inner = root[1].inner(ratatui::layout::Margin {
                     horizontal: 1,
                     vertical: 1,
@@ -671,24 +704,13 @@ fn run_loop(
                 app.transcript_view_width = transcript_inner.width.max(1) as usize;
                 app.transcript_view_height = transcript_inner.height.max(1) as usize;
                 let transcript_lines = transcript_lines(&app.messages, app.is_busy(), theme);
-                let mut transcript_title_spans = vec![
-                    Span::styled(
-                        "Transcript",
-                        Style::default()
-                            .fg(theme.title_label)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" | ", Style::default().fg(theme.title_meta)),
-                    Span::styled(active_title, Style::default().fg(theme.title_value)),
-                ];
-                if app.is_busy() {
-                    transcript_title_spans
-                        .push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
-                    transcript_title_spans.push(Span::styled(
-                        "Streaming...",
-                        Style::default().fg(theme.info),
-                    ));
-                }
+                let conversation_title = conversation_header_title(&app);
+                let transcript_title_spans = vec![Span::styled(
+                    conversation_title,
+                    Style::default()
+                        .fg(theme.title_label)
+                        .add_modifier(Modifier::BOLD),
+                )];
                 let transcript_base = Paragraph::new(transcript_lines)
                     .block(
                         Block::default()
@@ -720,7 +742,7 @@ fn run_loop(
                             .borders(Borders::ALL)
                             .title(Line::from(vec![
                                 Span::styled(
-                                    "Composer",
+                                    "Chat",
                                     Style::default()
                                         .fg(theme.title_label)
                                         .add_modifier(Modifier::BOLD),
@@ -730,7 +752,9 @@ fn run_loop(
                                 Span::styled(" ", Style::default().fg(theme.title_meta)),
                                 Span::styled(
                                     app.model.clone(),
-                                    Style::default().fg(theme.title_value_alt),
+                                    Style::default()
+                                        .fg(theme.title_value_alt)
+                                        .add_modifier(Modifier::BOLD),
                                 ),
                             ]))
                             .style(Style::default().bg(theme.surface_alt).fg(theme.text))
@@ -1006,7 +1030,7 @@ fn run_loop(
                         app.command_selected_index = 0;
                         app.status_message = "Command palette open.".to_string();
                     }
-                    KeyCode::Char('?') => {
+                    KeyCode::F(1) => {
                         app.mode = InputMode::Help;
                         app.status_message = "Help open.".to_string();
                     }
@@ -1774,6 +1798,54 @@ fn active_session_title(app: &AppState) -> String {
             .unwrap_or_else(|| format!("Session #{}", session.id));
     }
     format!("Session #{}", app.active_session_id)
+}
+
+fn conversation_header_title(app: &AppState) -> String {
+    if let Some(session) = app.sessions.iter().find(|s| s.id == app.active_session_id)
+        && let Some(title) = session.title.as_deref()
+    {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "Untitled Session".to_string()
+}
+
+fn status_mode_color(mode: InputMode, theme: ThemePalette) -> Color {
+    match mode {
+        InputMode::Normal => theme.success,
+        InputMode::CommandPalette => theme.warn,
+        InputMode::Insert => theme.error,
+        _ => theme.title_value_alt,
+    }
+}
+
+fn streaming_status_label(is_streaming: bool) -> String {
+    if !is_streaming {
+        return "Idle".to_string();
+    }
+    let ticks = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() / 300)
+        .unwrap_or(0);
+    match ticks % 3 {
+        0 => "Streaming.".to_string(),
+        1 => "Streaming..".to_string(),
+        _ => "Streaming...".to_string(),
+    }
+}
+
+fn truncate_with_ellipsis(value: &str, max_width: usize) -> String {
+    if value.chars().count() <= max_width {
+        return value.to_string();
+    }
+    if max_width <= 1 {
+        return "…".to_string();
+    }
+    let mut out: String = value.chars().take(max_width - 1).collect();
+    out.push('…');
+    out
 }
 
 fn session_manager_rows(app: &mut AppState, view_height: usize) -> Vec<String> {
