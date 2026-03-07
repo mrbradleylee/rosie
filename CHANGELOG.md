@@ -8,6 +8,11 @@
 - Moved active session context into the transcript title and model context into the composer title
 - Added an in-transcript pending response indicator (`[waiting for model response...]`) while streaming before assistant tokens arrive
 - Updated the TUI status header label from `Rosie TUI` to `🤖 Rosie`
+- Added built-in TUI theme support with `catppuccin` and `rose-pine` presets via config (`theme`)
+- Applied semantic theme styling across status, transcript, composer, footer, and modal surfaces/borders for clearer visual separation
+- Changed the default theme to `rose-pine`
+- Added `:theme` palette command to view/switch themes at runtime and persist selection to config
+- Updated `--configure` to stop prompting for theme selection
 
 ## 0.7.0
 

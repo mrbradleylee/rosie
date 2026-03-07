@@ -1,4 +1,5 @@
 // src/main.rs
+mod theme;
 mod tui;
 
 use anyhow::{Result, anyhow};
@@ -16,6 +17,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use theme::{DEFAULT_THEME, ThemeName};
 use tokio::io::{self as tokio_io, AsyncReadExt};
 
 const MAN_PAGE: &str = include_str!("../man/rosie.1");
@@ -144,8 +146,9 @@ async fn launch_tui(runtime_model: Option<&str>) -> Result<()> {
     let data_dir = app_data_dir()?;
     fs::create_dir_all(&data_dir)?;
     let db_path = data_dir.join("sessions.sqlite3");
+    let theme = ThemeName::from_config(config.theme.as_deref()).unwrap_or(DEFAULT_THEME);
 
-    tui::run(&host, &model, &db_path)?;
+    tui::run(&host, &model, theme, &db_path)?;
     Ok(())
 }
 
@@ -833,6 +836,7 @@ struct StoredConfig {
     default_model: Option<String>,
     ask_model: Option<String>,
     cmd_model: Option<String>,
+    theme: Option<String>,
     execution_enabled: Option<bool>,
     #[serde(default, alias = "model", skip_serializing)]
     legacy_model: Option<String>,
@@ -990,6 +994,7 @@ async fn configure() -> Result<()> {
             true,
         )?,
     };
+    let theme = ThemeName::from_config(existing.theme.as_deref()).unwrap_or(DEFAULT_THEME);
     let execution_enabled = prompt_bool_config_value(
         "Enable command execution for --cmd",
         existing.execution_enabled.unwrap_or(true),
@@ -1000,6 +1005,7 @@ async fn configure() -> Result<()> {
         default_model: normalize_config_value(default_model),
         ask_model: normalize_config_value(ask_model),
         cmd_model: normalize_config_value(cmd_model),
+        theme: Some(theme.as_str().to_string()),
         execution_enabled: Some(execution_enabled),
         legacy_model: None,
     };

@@ -1,3 +1,4 @@
+use crate::theme::{ThemeName, ThemePalette};
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -7,26 +8,29 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::env;
+use std::fs;
 use std::io;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-pub fn run(host: &str, model: &str, db_path: &Path) -> Result<()> {
+pub fn run(host: &str, model: &str, theme_name: ThemeName, db_path: &Path) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, host, model, db_path);
+    let result = run_loop(&mut terminal, host, model, theme_name, db_path);
     let cleanup_result = cleanup_terminal(&mut terminal);
 
     result.and(cleanup_result)
@@ -63,6 +67,7 @@ struct AppState {
     delete_return_to_session_manager: bool,
     session_rename_input: String,
     status_message: String,
+    theme: ThemePalette,
 }
 
 impl AppState {
@@ -70,6 +75,7 @@ impl AppState {
         host: &str,
         model: &str,
         default_model: &str,
+        theme: ThemePalette,
         store: SessionStore,
         active_session_id: i64,
         messages: Vec<ChatMessage>,
@@ -110,6 +116,7 @@ impl AppState {
                 "Loaded session #{}. Press i to enter Insert mode.",
                 active_session_id
             ),
+            theme,
         }
     }
 
@@ -397,6 +404,7 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     host: &str,
     model: &str,
+    theme_name: ThemeName,
     db_path: &Path,
 ) -> Result<()> {
     let store = SessionStore::open(db_path)?;
@@ -407,10 +415,12 @@ fn run_loop(
         .iter()
         .position(|item| item.id == session.session_id)
         .unwrap_or(0);
+    let theme = theme_name.palette();
     let mut app = AppState::new(
         host,
         &active_model,
         model,
+        theme,
         store,
         session.session_id,
         session.messages,
@@ -424,6 +434,11 @@ fn run_loop(
         process_title_fetch_events(&mut app);
 
         terminal.draw(|frame| {
+            let theme = app.theme;
+            frame.render_widget(
+                Block::default().style(Style::default().bg(theme.base)),
+                frame.area(),
+            );
             let root = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -445,12 +460,25 @@ fn run_loop(
                 InputMode::Help => "HELP",
             };
             let active_title = active_session_title(&app);
+            let transcript_active = app.mode == InputMode::Normal;
+            let composer_active = app.mode == InputMode::Insert;
             let header = Paragraph::new(format!(
                 "🤖 Rosie | Mode: {mode_label}{}",
                 if app.is_busy() { " | Streaming..." } else { "" }
             ))
-            .block(Block::default().borders(Borders::ALL).title("Status"))
-            .style(Style::default().add_modifier(Modifier::BOLD));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Status | Theme: {}", theme.name.as_str()))
+                    .style(Style::default().bg(theme.surface).fg(theme.text))
+                    .border_style(Style::default().fg(theme.border_active)),
+            )
+            .style(
+                Style::default()
+                    .bg(theme.surface)
+                    .fg(theme.text)
+                    .add_modifier(Modifier::BOLD),
+            );
             frame.render_widget(header, root[0]);
 
             let transcript_inner = root[1].inner(ratatui::layout::Margin {
@@ -470,7 +498,18 @@ fn run_loop(
                 format!("Transcript | {active_title}")
             };
             let transcript_base = Paragraph::new(transcript_lines)
-                .block(Block::default().borders(Borders::ALL).title(transcript_title))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(transcript_title)
+                        .style(Style::default().bg(theme.base).fg(theme.text))
+                        .border_style(Style::default().fg(if transcript_active {
+                            theme.border_active
+                        } else {
+                            theme.border
+                        })),
+                )
+                .style(Style::default().bg(theme.base).fg(theme.text))
                 .wrap(Wrap { trim: false });
             let total_lines = transcript_base.line_count(app.transcript_view_width as u16);
             let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
@@ -485,7 +524,18 @@ fn run_loop(
 
             let composer_title = format!("Composer | Model: {}", app.model);
             let composer = Paragraph::new(app.composer_input.as_str())
-                .block(Block::default().borders(Borders::ALL).title(composer_title))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(composer_title)
+                        .style(Style::default().bg(theme.surface_alt).fg(theme.text))
+                        .border_style(Style::default().fg(if composer_active {
+                            theme.accent
+                        } else {
+                            theme.border
+                        })),
+                )
+                .style(Style::default().bg(theme.surface_alt).fg(theme.text))
                 .wrap(Wrap { trim: false });
             frame.render_widget(composer, root[2]);
             if app.mode == InputMode::Insert {
@@ -518,7 +568,12 @@ fn run_loop(
                 InputMode::Help => "Help: Esc/q/? close",
             };
             let footer = Paragraph::new(format!("{} | {}", footer_help, app.status_message))
-                .style(Style::default().add_modifier(Modifier::DIM));
+                .style(
+                    Style::default()
+                        .bg(theme.surface)
+                        .fg(status_color(&app.status_message, theme))
+                        .add_modifier(Modifier::DIM),
+                );
             frame.render_widget(footer, root[3]);
 
             if app.mode == InputMode::CommandPalette {
@@ -541,7 +596,14 @@ fn run_loop(
                 }
                 let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
                 let command = Paragraph::new(lines)
-                    .block(Block::default().borders(Borders::ALL).title("Command"))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Command")
+                            .style(Style::default().bg(theme.surface).fg(theme.text))
+                            .border_style(Style::default().fg(theme.accent)),
+                    )
+                    .style(Style::default().bg(theme.surface).fg(theme.text))
                     .alignment(Alignment::Left)
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
@@ -551,7 +613,14 @@ fn run_loop(
                 let rows = session_manager_rows(&mut app, popup.height as usize);
                 let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
                 let session_modal = Paragraph::new(lines)
-                    .block(Block::default().borders(Borders::ALL).title("Sessions"))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Sessions")
+                            .style(Style::default().bg(theme.surface).fg(theme.text))
+                            .border_style(Style::default().fg(theme.accent)),
+                    )
+                    .style(Style::default().bg(theme.surface).fg(theme.text))
                     .alignment(Alignment::Left)
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
@@ -576,7 +645,14 @@ fn run_loop(
                 let confirm = Paragraph::new(format!(
                     "Delete session {target}?\nThis cannot be undone.\n[Y/n]"
                 ))
-                .block(Block::default().borders(Borders::ALL).title("Confirm Delete"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Confirm Delete")
+                        .style(Style::default().bg(theme.surface).fg(theme.text))
+                        .border_style(Style::default().fg(theme.error)),
+                )
+                .style(Style::default().bg(theme.surface).fg(theme.text))
                 .alignment(Alignment::Left);
                 frame.render_widget(Clear, popup);
                 frame.render_widget(confirm, popup);
@@ -605,7 +681,14 @@ fn run_loop(
 
                 let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
                 let picker = Paragraph::new(lines)
-                    .block(Block::default().borders(Borders::ALL).title("Models"))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Models")
+                            .style(Style::default().bg(theme.surface).fg(theme.text))
+                            .border_style(Style::default().fg(theme.accent)),
+                    )
+                    .style(Style::default().bg(theme.surface).fg(theme.text))
                     .alignment(Alignment::Left)
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
@@ -615,7 +698,14 @@ fn run_loop(
                 let rows = help_rows();
                 let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
                 let help = Paragraph::new(lines)
-                    .block(Block::default().borders(Borders::ALL).title("Help"))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Help")
+                            .style(Style::default().bg(theme.surface).fg(theme.text))
+                            .border_style(Style::default().fg(theme.accent)),
+                    )
+                    .style(Style::default().bg(theme.surface).fg(theme.text))
                     .alignment(Alignment::Left)
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
@@ -1767,7 +1857,7 @@ fn help_rows() -> Vec<String> {
         "  i: enter insert mode, Enter: send, Esc: return to normal".to_string(),
         "".to_string(),
         "Commands".to_string(),
-        "  :session  :models  :help  :quit".to_string(),
+        "  :session  :models  :theme [catppuccin|rose-pine]  :help  :quit".to_string(),
         "  ':' palette shows a picklist; use j/k (or arrows) + Enter".to_string(),
         "  :help or ? opens this panel".to_string(),
         "".to_string(),
@@ -1778,7 +1868,7 @@ fn help_rows() -> Vec<String> {
     ]
 }
 
-const PALETTE_COMMANDS: &[&str] = &["help", "session", "models", "quit"];
+const PALETTE_COMMANDS: &[&str] = &["help", "session", "models", "theme", "quit"];
 
 fn palette_suggestions(input: &str) -> Vec<&'static str> {
     let trimmed = input
@@ -1885,6 +1975,19 @@ fn transcript_rows(messages: &[ChatMessage], is_busy: bool) -> Vec<String> {
         rows.push(String::new());
     }
     rows
+}
+
+fn status_color(message: &str, theme: ThemePalette) -> Color {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("error") || lower.contains("failed") {
+        theme.error
+    } else if lower.contains("streaming") || lower.contains("loaded") || lower.contains("saved") {
+        theme.success
+    } else if lower.contains("cancel") || lower.contains("delete") || lower.contains("warning") {
+        theme.warn
+    } else {
+        theme.muted
+    }
 }
 
 fn max_scroll_for_view(total_lines: usize, view_height: usize) -> u16 {
@@ -2169,7 +2272,7 @@ fn run_palette_command(app: &mut AppState) -> bool {
         .to_string();
     let mut parts = raw_command.splitn(2, char::is_whitespace);
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
-    let _arg = parts.next().unwrap_or("").trim();
+    let arg = parts.next().unwrap_or("").trim();
 
     app.command_input.clear();
     app.mode = InputMode::Normal;
@@ -2193,11 +2296,77 @@ fn run_palette_command(app: &mut AppState) -> bool {
             app.status_message = "Help open.".to_string();
             false
         }
+        "theme" => {
+            apply_theme_command(app, arg);
+            false
+        }
         _ => {
             app.status_message = format!("Unknown command: :{command}");
             false
         }
     }
+}
+
+fn apply_theme_command(app: &mut AppState, arg: &str) {
+    if arg.is_empty() {
+        app.status_message = format!(
+            "Active theme: {} (options: catppuccin, rose-pine)",
+            app.theme.name.as_str()
+        );
+        return;
+    }
+
+    let Some(theme_name) = ThemeName::from_config(Some(arg)) else {
+        app.status_message = format!("Invalid theme '{arg}'. Use catppuccin or rose-pine.");
+        return;
+    };
+
+    app.theme = theme_name.palette();
+    match persist_theme_config(theme_name) {
+        Ok(()) => {
+            app.status_message = format!("Theme set to {}.", theme_name.as_str());
+        }
+        Err(err) => {
+            app.status_message = format!(
+                "Theme set to {}, but failed to persist: {err}",
+                theme_name.as_str()
+            );
+        }
+    }
+}
+
+fn persist_theme_config(theme_name: ThemeName) -> Result<()> {
+    let path = tui_config_path()?;
+    let mut value = match fs::read_to_string(&path) {
+        Ok(contents) => toml::from_str::<toml::Value>(&contents)
+            .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new())),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            toml::Value::Table(toml::map::Map::new())
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    let table = value
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("Config file root must be a TOML table"))?;
+    table.insert(
+        "theme".to_string(),
+        toml::Value::String(theme_name.as_str().to_string()),
+    );
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, toml::to_string_pretty(&value)?)?;
+    Ok(())
+}
+
+fn tui_config_path() -> Result<PathBuf> {
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .ok_or_else(|| anyhow!("Unable to determine config directory"))?;
+    Ok(base.join("rosie").join("config.toml"))
 }
 
 #[cfg(test)]
@@ -2232,6 +2401,7 @@ mod tests {
             "http://localhost:11434",
             "test-model",
             "test-model",
+            ThemeName::Catppuccin.palette(),
             store,
             active_session_id,
             messages,
@@ -2373,6 +2543,27 @@ mod tests {
             app.command_selected_index = 0;
             assert!(!run_palette_selected_command(&mut app));
             assert!(matches!(app.mode, InputMode::Help));
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn theme_command_switches_theme_in_memory() {
+        let db_path = temp_db_path("palette-theme");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open store");
+            let loaded = store.load_or_create_active_session().expect("load");
+            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+
+            app.command_input = ":theme rose-pine".to_string();
+            assert!(!run_palette_command(&mut app));
+            assert_eq!(app.theme.name, ThemeName::RosePine);
+
+            app.command_input = ":theme catppuccin".to_string();
+            assert!(!run_palette_command(&mut app));
+            assert_eq!(app.theme.name, ThemeName::Catppuccin);
         }
 
         let _ = fs::remove_file(&db_path);

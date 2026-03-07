@@ -69,6 +69,7 @@ to open the floating command panel (for example:
 .B :help ,
 .B :session ,
 .B :models ,
+.B :theme ,
 .B :quit
 ).
 In the command panel, use
@@ -103,6 +104,13 @@ In the model picker, use
 to apply to the active session, and
 .B Esc
 to cancel.
+Use
+.B :theme
+with
+.I catppuccin
+or
+.I rose-pine
+to switch TUI themes.
 Session model selections persist and are restored when switching sessions or restarting.
 Delete actions require confirmation with
 .B [Y/n]
@@ -170,6 +178,12 @@ Mode-specific default for
 Mode-specific default for
 .B --cmd
 (optional)
+.TP
+.B theme
+TUI theme name (
+.I catppuccin
+or
+.IR rose-pine )
 .TP
 .B execution_enabled
 If false, command execution is disabled in

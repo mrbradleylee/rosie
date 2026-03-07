@@ -11,6 +11,7 @@ Running `rosie` with no mode flag launches the full-screen TUI chat interface (s
 - `--ask` quick chat mode for one-shot responses
 - `--cmd` command-generation mode with existing `e/r/q` interactive flow
 - Default no-flag TUI chat mode with persisted local sessions
+- Built-in TUI themes (`catppuccin` and `rose-pine`)
 - `--model <MODEL>` runtime model override for both `--ask` and `--cmd`
 - Config-driven Ollama host/model defaults in `~/.config/rosie/config.toml`
 - Interactive `--configure` flow with model discovery from Ollama
@@ -89,6 +90,7 @@ In the default TUI:
   - `:help`
   - `:session` (open session manager modal)
   - `:models` (open model picker from Ollama `/api/tags` for the active session)
+  - `:theme <catppuccin|rose-pine>` (set TUI theme)
   - `:quit`
 - in the `:` command panel, use `j`/`k` (or arrows) to select from the command picklist and `Enter` to run
 - in session manager, use `j`/`k` to select and `Enter` switch, `n` new, `r` rename, `d` delete (with confirmation), `Esc` close
@@ -124,6 +126,8 @@ That command creates/updates config and prompts for:
 - `cmd_model` (optional)
 - `execution_enabled` (controls whether execute is allowed in `--cmd`)
 
+Theme is controlled in TUI with `:theme` and persisted into config as `theme`.
+
 Example config:
 
 ```toml
@@ -131,6 +135,7 @@ ollama_host = "http://localhost:11434"
 default_model = "llama3.2"
 ask_model = "llama3.2"
 cmd_model = "qwen2.5-coder"
+theme = "rose-pine"
 execution_enabled = true
 ```
 
