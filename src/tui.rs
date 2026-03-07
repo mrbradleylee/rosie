@@ -44,7 +44,7 @@ struct AppState {
     active_session_id: i64,
     sessions: Vec<SessionSummary>,
     selected_session_index: usize,
-    normal_focus: NormalFocus,
+    session_modal_offset: usize,
     store: SessionStore,
     transcript_scroll: u16,
     transcript_follow: bool,
@@ -52,14 +52,16 @@ struct AppState {
     transcript_view_height: usize,
     transcript_max_scroll: u16,
     pending_g: bool,
-    pending_d: bool,
     in_flight: Option<InFlightRequest>,
     model_fetch: Option<InFlightModelFetch>,
+    title_fetches: Vec<InFlightTitleFetch>,
     model_options: Vec<String>,
     model_selected_index: usize,
     model_loading: bool,
     model_error: Option<String>,
     pending_delete_session_id: Option<i64>,
+    delete_return_to_session_manager: bool,
+    session_rename_input: String,
     status_message: String,
 }
 
@@ -86,7 +88,7 @@ impl AppState {
             active_session_id,
             sessions,
             selected_session_index,
-            normal_focus: NormalFocus::Transcript,
+            session_modal_offset: 0,
             store,
             transcript_scroll: 0,
             transcript_follow: true,
@@ -94,14 +96,16 @@ impl AppState {
             transcript_view_height: 1,
             transcript_max_scroll: 0,
             pending_g: false,
-            pending_d: false,
             in_flight: None,
             model_fetch: None,
+            title_fetches: Vec::new(),
             model_options: Vec::new(),
             model_selected_index: 0,
             model_loading: false,
             model_error: None,
             pending_delete_session_id: None,
+            delete_return_to_session_manager: false,
+            session_rename_input: String::new(),
             status_message: format!(
                 "Loaded session #{}. Press i to enter Insert mode.",
                 active_session_id
@@ -115,16 +119,12 @@ impl AppState {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum NormalFocus {
-    Sessions,
-    Transcript,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum InputMode {
     Normal,
     Insert,
     CommandPalette,
+    SessionManager,
+    SessionRename,
     ConfirmDelete,
     ModelSelect,
     Help,
@@ -321,6 +321,21 @@ impl SessionStore {
         )?;
         Ok(())
     }
+
+    fn rename_session_if_current_title(
+        &self,
+        session_id: i64,
+        expected_title: Option<&str>,
+        new_title: Option<&str>,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE sessions
+             SET title = ?1, updated_at = ?2
+             WHERE id = ?3 AND COALESCE(title, '') = COALESCE(?4, '')",
+            params![new_title, unix_timestamp(), session_id, expected_title],
+        )?;
+        Ok(changed > 0)
+    }
 }
 
 fn ensure_sessions_model_column(conn: &Connection) -> Result<()> {
@@ -354,6 +369,14 @@ enum ModelFetchEvent {
     Error(String),
 }
 
+enum TitleFetchEvent {
+    Generated {
+        session_id: i64,
+        expected_title: String,
+        generated_title: String,
+    },
+}
+
 struct InFlightRequest {
     receiver: mpsc::UnboundedReceiver<StreamEvent>,
     handle: JoinHandle<()>,
@@ -362,6 +385,11 @@ struct InFlightRequest {
 
 struct InFlightModelFetch {
     receiver: mpsc::UnboundedReceiver<ModelFetchEvent>,
+    handle: JoinHandle<()>,
+}
+
+struct InFlightTitleFetch {
+    receiver: mpsc::UnboundedReceiver<TitleFetchEvent>,
     handle: JoinHandle<()>,
 }
 
@@ -393,6 +421,7 @@ fn run_loop(
     loop {
         process_stream_events(&mut app);
         process_model_fetch_events(&mut app);
+        process_title_fetch_events(&mut app);
 
         terminal.draw(|frame| {
             let root = Layout::default()
@@ -409,12 +438,16 @@ fn run_loop(
                 InputMode::Normal => "NORMAL",
                 InputMode::Insert => "INSERT",
                 InputMode::CommandPalette => "COMMAND",
+                InputMode::SessionManager => "SESSIONS",
+                InputMode::SessionRename => "RENAME",
                 InputMode::ConfirmDelete => "CONFIRM",
                 InputMode::ModelSelect => "MODELS",
                 InputMode::Help => "HELP",
             };
+            let active_title = active_session_title(&app);
             let header = Paragraph::new(format!(
-                "Rosie TUI | Mode: {mode_label} | Host: {} | Model: {}{}",
+                "Rosie TUI | Mode: {mode_label} | Session: {} | Host: {} | Model: {}{}",
+                active_title,
                 app.host,
                 app.model,
                 if app.is_busy() { " | Streaming..." } else { "" }
@@ -423,46 +456,19 @@ fn run_loop(
             .style(Style::default().add_modifier(Modifier::BOLD));
             frame.render_widget(header, root[0]);
 
-            let body = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-                .split(root[1]);
-            let transcript_inner = body[1].inner(ratatui::layout::Margin {
+            let transcript_inner = root[1].inner(ratatui::layout::Margin {
                 horizontal: 1,
                 vertical: 1,
             });
             app.transcript_view_width = transcript_inner.width.max(1) as usize;
             app.transcript_view_height = transcript_inner.height.max(1) as usize;
-
-            let session_rows = session_rows(&app);
-            let session_lines: Vec<Line<'_>> =
-                session_rows.iter().map(|row| Line::from(row.as_str())).collect();
-            let sessions = Paragraph::new(session_lines).block(
-                Block::default().borders(Borders::ALL).title(format!(
-                    "Sessions{}",
-                    if app.normal_focus == NormalFocus::Sessions {
-                        " [focus]"
-                    } else {
-                        ""
-                    }
-                )),
-            );
-            frame.render_widget(sessions, body[0]);
-
             let transcript_rows = transcript_rows(&app.messages);
             let transcript_lines: Vec<Line<'_>> = transcript_rows
                 .iter()
                 .map(|row| Line::from(row.as_str()))
                 .collect();
             let transcript_base = Paragraph::new(transcript_lines)
-                .block(Block::default().borders(Borders::ALL).title(format!(
-                    "Transcript{}",
-                    if app.normal_focus == NormalFocus::Transcript {
-                        " [focus]"
-                    } else {
-                        ""
-                    }
-                )))
+                .block(Block::default().borders(Borders::ALL).title("Transcript"))
                 .wrap(Wrap { trim: false });
             let total_lines = transcript_base.line_count(app.transcript_view_width as u16);
             let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
@@ -473,7 +479,7 @@ fn run_loop(
                 app.transcript_scroll = max_scroll;
             }
             let transcript = transcript_base.scroll((app.transcript_scroll, 0));
-            frame.render_widget(transcript, body[1]);
+            frame.render_widget(transcript, root[1]);
 
             let composer = Paragraph::new(app.composer_input.as_str())
                 .block(Block::default().borders(Borders::ALL).title("Composer"))
@@ -493,13 +499,17 @@ fn run_loop(
             let footer_help = match app.mode {
                 InputMode::Normal => {
                     if app.is_busy() {
-                        "Tab: focus | j/k: move | Enter: open | i: compose (disabled) | : cmd | ?: help | Esc: cancel stream | Ctrl+C: quit"
+                        "j/k scroll | i compose (disabled) | : cmd | ?: help | Esc cancel stream | Ctrl+C quit"
                     } else {
-                        "Tab: focus | j/k: move | Enter: open | i: compose | : cmd | ?: help | Ctrl+C: quit"
+                        "j/k scroll | i compose | : cmd | ?: help | Ctrl+C quit"
                     }
                 }
                 InputMode::Insert => "Enter: send | Backspace: edit | Esc: normal",
-                InputMode::CommandPalette => "Type command | Enter: run | Esc: cancel",
+                InputMode::CommandPalette => "Type command | j/k pick | Enter run | Esc cancel",
+                InputMode::SessionManager => {
+                    "j/k move | Enter switch | n new | r rename | d delete | Esc close"
+                }
+                InputMode::SessionRename => "Type title | Enter save | Esc cancel",
                 InputMode::ConfirmDelete => "Confirm delete: Enter/y=yes, n/Esc=no",
                 InputMode::ModelSelect => "Model picker: j/k move | Enter select | Esc cancel",
                 InputMode::Help => "Help: Esc/q/? close",
@@ -518,7 +528,9 @@ fn run_loop(
                 if suggestions.is_empty() {
                     rows.push("  (no matching commands)".to_string());
                 } else {
-                    let selected = app.command_selected_index.min(suggestions.len().saturating_sub(1));
+                    let selected = app
+                        .command_selected_index
+                        .min(suggestions.len().saturating_sub(1));
                     for (idx, item) in suggestions.iter().enumerate() {
                         let marker = if idx == selected { ">" } else { " " };
                         rows.push(format!("{marker} {item}"));
@@ -531,6 +543,27 @@ fn run_loop(
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
                 frame.render_widget(command, popup);
+            } else if app.mode == InputMode::SessionManager || app.mode == InputMode::SessionRename {
+                let popup = centered_rect(90, 18, frame.area());
+                let rows = session_manager_rows(&mut app, popup.height as usize);
+                let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
+                let session_modal = Paragraph::new(lines)
+                    .block(Block::default().borders(Borders::ALL).title("Sessions"))
+                    .alignment(Alignment::Left)
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(Clear, popup);
+                frame.render_widget(session_modal, popup);
+
+                if app.mode == InputMode::SessionRename {
+                    let inner = popup.inner(ratatui::layout::Margin {
+                        horizontal: 1,
+                        vertical: 1,
+                    });
+                    let cursor_offset = app.session_rename_input.chars().count() as u16;
+                    let cursor_x = inner.x + (9 + cursor_offset).min(inner.width.saturating_sub(1));
+                    let cursor_y = inner.y + 2;
+                    frame.set_cursor_position((cursor_x, cursor_y));
+                }
             } else if app.mode == InputMode::ConfirmDelete {
                 let popup = centered_rect(60, 5, frame.area());
                 let target = app
@@ -575,7 +608,7 @@ fn run_loop(
                 frame.render_widget(Clear, popup);
                 frame.render_widget(picker, popup);
             } else if app.mode == InputMode::Help {
-                let popup = centered_rect(78, 14, frame.area());
+                let popup = centered_rect(78, 16, frame.area());
                 let rows = help_rows();
                 let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
                 let help = Paragraph::new(lines)
@@ -594,119 +627,55 @@ fn run_loop(
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 cancel_request(&mut app, true);
                 cancel_model_fetch(&mut app);
+                cancel_title_fetches(&mut app);
                 break;
             }
 
             match app.mode {
                 InputMode::Normal => match key.code {
-                    KeyCode::Tab => {
-                        app.pending_g = false;
-                        app.pending_d = false;
-                        app.normal_focus = match app.normal_focus {
-                            NormalFocus::Transcript => NormalFocus::Sessions,
-                            NormalFocus::Sessions => NormalFocus::Transcript,
-                        };
-                        app.status_message = match app.normal_focus {
-                            NormalFocus::Transcript => "Focus: transcript".to_string(),
-                            NormalFocus::Sessions => "Focus: sessions".to_string(),
-                        };
-                    }
-                    KeyCode::Enter => {
-                        app.pending_g = false;
-                        app.pending_d = false;
-                        if app.normal_focus == NormalFocus::Sessions {
-                            switch_to_selected_session(&mut app);
-                        }
-                    }
                     KeyCode::PageDown => {
                         let page = app.transcript_view_height as u16;
-                        if app.normal_focus == NormalFocus::Transcript {
-                            scroll_transcript_down(&mut app, page);
-                        }
+                        scroll_transcript_down(&mut app, page);
                         app.pending_g = false;
-                        app.pending_d = false;
                     }
                     KeyCode::PageUp => {
                         let page = app.transcript_view_height as u16;
-                        if app.normal_focus == NormalFocus::Transcript {
-                            scroll_transcript_up(&mut app, page);
-                        }
+                        scroll_transcript_up(&mut app, page);
                         app.pending_g = false;
-                        app.pending_d = false;
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
-                        if app.normal_focus == NormalFocus::Sessions {
-                            move_session_selection_down(&mut app, 1);
-                        } else {
-                            scroll_transcript_down(&mut app, 1);
-                        }
+                        scroll_transcript_down(&mut app, 1);
                         app.pending_g = false;
-                        app.pending_d = false;
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
-                        if app.normal_focus == NormalFocus::Sessions {
-                            move_session_selection_up(&mut app, 1);
-                        } else {
-                            scroll_transcript_up(&mut app, 1);
-                        }
+                        scroll_transcript_up(&mut app, 1);
                         app.pending_g = false;
-                        app.pending_d = false;
                     }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if app.normal_focus == NormalFocus::Transcript {
-                            let half_page = (app.transcript_view_height / 2).max(1) as u16;
-                            scroll_transcript_down(&mut app, half_page);
-                        }
+                        let half_page = (app.transcript_view_height / 2).max(1) as u16;
+                        scroll_transcript_down(&mut app, half_page);
                         app.pending_g = false;
-                        app.pending_d = false;
                     }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if app.normal_focus == NormalFocus::Transcript {
-                            let half_page = (app.transcript_view_height / 2).max(1) as u16;
-                            scroll_transcript_up(&mut app, half_page);
-                        }
+                        let half_page = (app.transcript_view_height / 2).max(1) as u16;
+                        scroll_transcript_up(&mut app, half_page);
                         app.pending_g = false;
-                        app.pending_d = false;
                     }
                     KeyCode::Char('G') => {
-                        if app.normal_focus == NormalFocus::Sessions {
-                            move_session_selection_to_bottom(&mut app);
-                        } else {
-                            scroll_transcript_to_bottom(&mut app);
-                        }
+                        scroll_transcript_to_bottom(&mut app);
                         app.pending_g = false;
-                        app.pending_d = false;
                     }
                     KeyCode::Char('g') => {
-                        app.pending_d = false;
                         if app.pending_g {
-                            if app.normal_focus == NormalFocus::Sessions {
-                                move_session_selection_to_top(&mut app);
-                            } else {
-                                scroll_transcript_to_top(&mut app);
-                            }
+                            scroll_transcript_to_top(&mut app);
                             app.pending_g = false;
                         } else {
                             app.pending_g = true;
                             app.status_message = "g pressed. Press g again for top.".to_string();
                         }
                     }
-                    KeyCode::Char('d') => {
-                        app.pending_g = false;
-                        if app.normal_focus != NormalFocus::Sessions {
-                            app.pending_d = false;
-                        } else if app.pending_d {
-                            app.pending_d = false;
-                            open_delete_confirmation_for_selected_session(&mut app);
-                        } else {
-                            app.pending_d = true;
-                            app.status_message =
-                                "d pressed. Press d again to delete selected session.".to_string();
-                        }
-                    }
                     KeyCode::Char('i') => {
                         app.pending_g = false;
-                        app.pending_d = false;
                         if app.is_busy() {
                             app.status_message =
                                 "Wait for streaming to finish or press Esc to cancel.".to_string();
@@ -717,7 +686,6 @@ fn run_loop(
                     }
                     KeyCode::Char(':') => {
                         app.pending_g = false;
-                        app.pending_d = false;
                         app.mode = InputMode::CommandPalette;
                         app.command_input.clear();
                         app.command_selected_index = 0;
@@ -725,26 +693,21 @@ fn run_loop(
                     }
                     KeyCode::Char('?') => {
                         app.pending_g = false;
-                        app.pending_d = false;
                         app.mode = InputMode::Help;
                         app.status_message = "Help open.".to_string();
                     }
                     KeyCode::Esc => {
                         app.pending_g = false;
-                        app.pending_d = false;
                         if app.is_busy() {
                             cancel_request(&mut app, false);
                         }
                     }
                     _ => {
                         app.pending_g = false;
-                        app.pending_d = false;
                     }
                 },
                 InputMode::Insert => match key.code {
                     KeyCode::Esc => {
-                        app.pending_g = false;
-                        app.pending_d = false;
                         app.mode = InputMode::Normal;
                         app.status_message = "Normal mode.".to_string();
                     }
@@ -761,8 +724,6 @@ fn run_loop(
                 },
                 InputMode::CommandPalette => match key.code {
                     KeyCode::Esc => {
-                        app.pending_g = false;
-                        app.pending_d = false;
                         app.mode = InputMode::Normal;
                         app.command_input.clear();
                         app.command_selected_index = 0;
@@ -772,6 +733,7 @@ fn run_loop(
                         if run_palette_selected_command(&mut app) {
                             cancel_request(&mut app, true);
                             cancel_model_fetch(&mut app);
+                            cancel_title_fetches(&mut app);
                             break;
                         }
                     }
@@ -791,13 +753,63 @@ fn run_loop(
                     }
                     _ => {}
                 },
+                InputMode::SessionManager => match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        app.mode = InputMode::Normal;
+                        app.status_message = "Session manager closed.".to_string();
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => move_session_selection_down(&mut app, 1),
+                    KeyCode::Char('k') | KeyCode::Up => move_session_selection_up(&mut app, 1),
+                    KeyCode::Char('G') => move_session_selection_to_bottom(&mut app),
+                    KeyCode::Char('g') => {
+                        if app.pending_g {
+                            move_session_selection_to_top(&mut app);
+                            app.pending_g = false;
+                        } else {
+                            app.pending_g = true;
+                        }
+                    }
+                    KeyCode::Char('n') => create_and_activate_session(&mut app),
+                    KeyCode::Char('r') => open_session_rename(&mut app),
+                    KeyCode::Char('d') => open_delete_confirmation_for_selected_session(&mut app),
+                    KeyCode::Enter => {
+                        if switch_to_selected_session(&mut app) {
+                            app.mode = InputMode::Normal;
+                        }
+                    }
+                    _ => {
+                        app.pending_g = false;
+                    }
+                },
+                InputMode::SessionRename => match key.code {
+                    KeyCode::Esc => {
+                        app.mode = InputMode::SessionManager;
+                        app.session_rename_input.clear();
+                        app.status_message = "Session rename cancelled.".to_string();
+                    }
+                    KeyCode::Enter => {
+                        submit_session_rename(&mut app);
+                    }
+                    KeyCode::Backspace => {
+                        app.session_rename_input.pop();
+                    }
+                    KeyCode::Char(ch) => {
+                        app.session_rename_input.push(ch);
+                    }
+                    _ => {}
+                },
                 InputMode::ConfirmDelete => match key.code {
                     KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                         confirm_delete_session(&mut app);
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                         app.pending_delete_session_id = None;
-                        app.mode = InputMode::Normal;
+                        app.mode = if app.delete_return_to_session_manager {
+                            InputMode::SessionManager
+                        } else {
+                            InputMode::Normal
+                        };
+                        app.delete_return_to_session_manager = false;
                         app.status_message = "Delete cancelled.".to_string();
                     }
                     _ => {}
@@ -898,7 +910,6 @@ fn submit_composer_message(app: &mut AppState) {
         assistant_message_id,
     });
     app.mode = InputMode::Normal;
-    app.normal_focus = NormalFocus::Transcript;
     app.transcript_follow = true;
     refresh_sessions(app, Some(app.active_session_id));
     app.status_message = "Sending request to Ollama...".to_string();
@@ -929,6 +940,38 @@ fn maybe_auto_title_session(app: &mut AppState, first_user_message: &str) {
         return;
     }
     refresh_sessions(app, Some(app.active_session_id));
+    start_generated_session_title(app, app.active_session_id, &title, first_user_message);
+}
+
+fn start_generated_session_title(
+    app: &mut AppState,
+    session_id: i64,
+    expected_title: &str,
+    first_user_message: &str,
+) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    let host = app.host.clone();
+    let model = app.model.clone();
+    let expected_title = expected_title.to_string();
+    let first_user_message = first_user_message.to_string();
+    let handle = runtime.spawn(async move {
+        if let Ok(generated_title) =
+            generate_session_title(&host, &model, &first_user_message).await
+        {
+            let _ = tx.send(TitleFetchEvent::Generated {
+                session_id,
+                expected_title,
+                generated_title,
+            });
+        }
+    });
+    app.title_fetches.push(InFlightTitleFetch {
+        receiver: rx,
+        handle,
+    });
 }
 
 fn suggest_session_title(message: &str) -> String {
@@ -1040,7 +1083,7 @@ fn suggest_session_title(message: &str) -> String {
     }
 
     let mut title = selected.join(" ");
-    const MAX_LEN: usize = 44;
+    const MAX_LEN: usize = 32;
     if title.chars().count() > MAX_LEN {
         title = title.chars().take(MAX_LEN).collect::<String>();
         while title.ends_with(char::is_whitespace) {
@@ -1180,6 +1223,65 @@ fn process_model_fetch_events(app: &mut AppState) {
     }
 }
 
+fn process_title_fetch_events(app: &mut AppState) {
+    if app.title_fetches.is_empty() {
+        return;
+    }
+
+    let mut pending = Vec::with_capacity(app.title_fetches.len());
+    let fetches = std::mem::take(&mut app.title_fetches);
+    for mut fetch in fetches {
+        let mut finished = false;
+        loop {
+            match fetch.receiver.try_recv() {
+                Ok(TitleFetchEvent::Generated {
+                    session_id,
+                    expected_title,
+                    generated_title,
+                }) => {
+                    let cleaned = normalize_generated_title(&generated_title);
+                    if !cleaned.is_empty() && cleaned != expected_title {
+                        match app.store.rename_session_if_current_title(
+                            session_id,
+                            Some(&expected_title),
+                            Some(&cleaned),
+                        ) {
+                            Ok(true) => {
+                                refresh_sessions(app, Some(app.active_session_id));
+                                if session_id == app.active_session_id {
+                                    app.status_message =
+                                        format!("Auto-renamed session to \"{cleaned}\".");
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(err) => {
+                                if session_id == app.active_session_id {
+                                    app.status_message =
+                                        format!("Failed to apply generated title: {err}");
+                                }
+                            }
+                        }
+                    }
+                    finished = true;
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    finished = true;
+                    break;
+                }
+            }
+        }
+
+        if finished {
+            fetch.handle.abort();
+        } else {
+            pending.push(fetch);
+        }
+    }
+    app.title_fetches = pending;
+}
+
 fn cancel_request(app: &mut AppState, silent: bool) {
     if let Some(in_flight) = app.in_flight.take() {
         in_flight.handle.abort();
@@ -1215,15 +1317,38 @@ fn persist_last_assistant_message(app: &mut AppState, assistant_message_id: i64)
     }
 }
 
-fn session_rows(app: &AppState) -> Vec<String> {
+fn active_session_title(app: &AppState) -> String {
+    if let Some(session) = app.sessions.iter().find(|s| s.id == app.active_session_id) {
+        return session
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("Session #{}", session.id));
+    }
+    format!("Session #{}", app.active_session_id)
+}
+
+fn session_manager_rows(app: &mut AppState, view_height: usize) -> Vec<String> {
+    let mut rows = vec!["Enter=switch n=new r=rename d=delete Esc=close".to_string()];
+    if app.mode == InputMode::SessionRename {
+        rows.push(String::new());
+        rows.push(format!("Rename: {}", app.session_rename_input));
+    }
     if app.sessions.is_empty() {
-        return vec!["No sessions".to_string()];
+        rows.push("No sessions".to_string());
+        return rows;
     }
 
-    let mut rows = Vec::with_capacity(app.sessions.len() + 1);
-    rows.push("Enter: open selected".to_string());
-    for (idx, session) in app.sessions.iter().enumerate() {
-        let selected_marker = if idx == app.selected_session_index {
+    let reserved = rows.len();
+    let rows_per_session = 1usize;
+    let visible_sessions = ((view_height.saturating_sub(reserved + 2)) / rows_per_session).max(1);
+    adjust_session_modal_offset(app, visible_sessions);
+    let start = app
+        .session_modal_offset
+        .min(app.sessions.len().saturating_sub(1));
+    let end = (start + visible_sessions).min(app.sessions.len());
+    for (idx, session) in app.sessions[start..end].iter().enumerate() {
+        let absolute_idx = start + idx;
+        let selected_marker = if absolute_idx == app.selected_session_index {
             ">"
         } else {
             " "
@@ -1233,22 +1358,36 @@ fn session_rows(app: &AppState) -> Vec<String> {
         } else {
             " "
         };
-        let label = session
+        let title = session
             .title
             .as_deref()
             .map(str::to_string)
             .unwrap_or_else(|| format!("Session #{}", session.id));
-        let model_suffix = session
+        let model = session
             .model
             .as_deref()
-            .map(|value| format!(" [{value}]"))
-            .unwrap_or_default();
+            .unwrap_or(app.default_model.as_str());
         rows.push(format!(
-            "{selected_marker}{active_marker} {label}{model_suffix} ({})",
-            session.message_count,
+            "{selected_marker}{active_marker} {title} [{model}] | {} msgs",
+            session.message_count
         ));
     }
     rows
+}
+
+fn adjust_session_modal_offset(app: &mut AppState, visible_sessions: usize) {
+    if app.sessions.is_empty() {
+        app.session_modal_offset = 0;
+        return;
+    }
+    let max_offset = app.sessions.len().saturating_sub(visible_sessions);
+    let mut offset = app.session_modal_offset.min(max_offset);
+    if app.selected_session_index < offset {
+        offset = app.selected_session_index;
+    } else if app.selected_session_index >= offset + visible_sessions {
+        offset = app.selected_session_index + 1 - visible_sessions;
+    }
+    app.session_modal_offset = offset.min(max_offset);
 }
 
 fn refresh_sessions(app: &mut AppState, preferred_session_id: Option<i64>) {
@@ -1273,6 +1412,8 @@ fn refresh_sessions(app: &mut AppState, preferred_session_id: Option<i64>) {
                         .position(|session| session.id == app.active_session_id)
                 })
                 .unwrap_or(0);
+            let max_offset = app.sessions.len().saturating_sub(1);
+            app.session_modal_offset = app.session_modal_offset.min(max_offset);
         }
         Err(err) => {
             app.status_message = format!("Failed to refresh sessions: {err}");
@@ -1311,22 +1452,22 @@ fn move_session_selection_to_bottom(app: &mut AppState) {
     app.status_message = "Sessions: bottom".to_string();
 }
 
-fn switch_to_selected_session(app: &mut AppState) {
+fn switch_to_selected_session(app: &mut AppState) -> bool {
     if app.is_busy() {
         app.status_message =
             "Cannot switch sessions while request is in progress. Press Esc to cancel first."
                 .to_string();
-        return;
+        return false;
     }
 
     let Some(selected) = app.sessions.get(app.selected_session_index).cloned() else {
         app.status_message = "No session selected.".to_string();
-        return;
+        return false;
     };
 
     if selected.id == app.active_session_id {
         app.status_message = format!("Session #{} is already active.", selected.id);
-        return;
+        return true;
     }
 
     match app.store.load_session(selected.id) {
@@ -1337,12 +1478,13 @@ fn switch_to_selected_session(app: &mut AppState) {
             app.composer_input.clear();
             app.transcript_scroll = 0;
             app.transcript_follow = true;
-            app.normal_focus = NormalFocus::Transcript;
             refresh_sessions(app, Some(selected.id));
             app.status_message = format!("Switched to session #{}.", selected.id);
+            true
         }
         Err(err) => {
             app.status_message = format!("Failed to load session #{}: {err}", selected.id);
+            false
         }
     }
 }
@@ -1382,7 +1524,6 @@ fn activate_session_or_create(
     app.composer_input.clear();
     app.transcript_scroll = 0;
     app.transcript_follow = true;
-    app.normal_focus = NormalFocus::Transcript;
     refresh_sessions(app, Some(target_id));
     Ok(target_id)
 }
@@ -1400,24 +1541,91 @@ fn open_delete_confirmation_for_selected_session(app: &mut AppState) {
     };
 
     app.pending_delete_session_id = Some(selected.id);
+    app.delete_return_to_session_manager = app.mode == InputMode::SessionManager;
     app.mode = InputMode::ConfirmDelete;
     app.status_message = format!("Confirm delete session #{}.", selected.id);
 }
 
-fn open_delete_confirmation_for_active_session(app: &mut AppState) {
+fn open_session_manager(app: &mut AppState) {
+    refresh_sessions(app, Some(app.active_session_id));
+    app.mode = InputMode::SessionManager;
+    app.session_rename_input.clear();
+    app.delete_return_to_session_manager = false;
+    app.status_message = "Session manager open.".to_string();
+}
+
+fn create_and_activate_session(app: &mut AppState) {
     if app.is_busy() {
         app.status_message =
-            "Cannot delete while request is in progress. Press Esc to cancel first.".to_string();
+            "Cannot create while request is in progress. Press Esc to cancel first.".to_string();
         return;
     }
-    app.pending_delete_session_id = Some(app.active_session_id);
-    app.mode = InputMode::ConfirmDelete;
-    app.status_message = format!("Confirm delete session #{}.", app.active_session_id);
+
+    match app.store.create_session() {
+        Ok(session_id) => {
+            app.active_session_id = session_id;
+            app.messages.clear();
+            app.model = app.default_model.clone();
+            app.composer_input.clear();
+            app.transcript_scroll = 0;
+            app.transcript_follow = true;
+            refresh_sessions(app, Some(session_id));
+            app.status_message = format!("Started new session #{}.", session_id);
+        }
+        Err(err) => {
+            app.status_message = format!("Failed to create session: {err}");
+        }
+    }
+}
+
+fn open_session_rename(app: &mut AppState) {
+    if app.is_busy() {
+        app.status_message =
+            "Cannot rename while request is in progress. Press Esc to cancel first.".to_string();
+        return;
+    }
+    let Some(selected) = app.sessions.get(app.selected_session_index) else {
+        app.status_message = "No session selected.".to_string();
+        return;
+    };
+    app.session_rename_input = selected.title.clone().unwrap_or_default();
+    app.mode = InputMode::SessionRename;
+    app.status_message = format!("Renaming session #{}.", selected.id);
+}
+
+fn submit_session_rename(app: &mut AppState) {
+    let Some(selected) = app.sessions.get(app.selected_session_index).cloned() else {
+        app.mode = InputMode::SessionManager;
+        app.status_message = "No session selected.".to_string();
+        return;
+    };
+    let trimmed = app.session_rename_input.trim().to_string();
+    let title = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.as_str())
+    };
+    match app.store.rename_session(selected.id, title) {
+        Ok(()) => {
+            refresh_sessions(app, Some(selected.id));
+            app.mode = InputMode::SessionManager;
+            app.session_rename_input.clear();
+            app.status_message = format!("Renamed session #{}.", selected.id);
+        }
+        Err(err) => {
+            app.status_message = format!("Failed to rename session: {err}");
+        }
+    }
 }
 
 fn confirm_delete_session(app: &mut AppState) {
     let Some(deleted_id) = app.pending_delete_session_id.take() else {
-        app.mode = InputMode::Normal;
+        app.mode = if app.delete_return_to_session_manager {
+            InputMode::SessionManager
+        } else {
+            InputMode::Normal
+        };
+        app.delete_return_to_session_manager = false;
         app.status_message = "No session selected for deletion.".to_string();
         return;
     };
@@ -1432,7 +1640,12 @@ fn confirm_delete_session(app: &mut AppState) {
             };
             match activate_session_or_create(app, preferred) {
                 Ok(new_active_id) => {
-                    app.mode = InputMode::Normal;
+                    app.mode = if app.delete_return_to_session_manager {
+                        InputMode::SessionManager
+                    } else {
+                        InputMode::Normal
+                    };
+                    app.delete_return_to_session_manager = false;
                     if was_active {
                         app.status_message = format!(
                             "Deleted session #{}. Active session is now #{}.",
@@ -1443,20 +1656,35 @@ fn confirm_delete_session(app: &mut AppState) {
                     }
                 }
                 Err(err) => {
-                    app.mode = InputMode::Normal;
+                    app.mode = if app.delete_return_to_session_manager {
+                        InputMode::SessionManager
+                    } else {
+                        InputMode::Normal
+                    };
+                    app.delete_return_to_session_manager = false;
                     app.status_message =
                         format!("Deleted session, but failed to load replacement: {err}");
                 }
             }
         }
         Err(err) => {
-            app.mode = InputMode::Normal;
+            app.mode = if app.delete_return_to_session_manager {
+                InputMode::SessionManager
+            } else {
+                InputMode::Normal
+            };
+            app.delete_return_to_session_manager = false;
             app.status_message = format!("Failed to delete session: {err}");
         }
     }
 }
 
 fn open_model_picker(app: &mut AppState) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        app.mode = InputMode::Normal;
+        app.status_message = "Model picker unavailable outside async runtime.".to_string();
+        return;
+    };
     cancel_model_fetch(app);
     app.mode = InputMode::ModelSelect;
     app.model_options.clear();
@@ -1467,7 +1695,7 @@ fn open_model_picker(app: &mut AppState) {
 
     let (tx, rx) = mpsc::unbounded_channel();
     let host = app.host.clone();
-    let handle = tokio::spawn(async move {
+    let handle = runtime.spawn(async move {
         match fetch_ollama_models(&host).await {
             Ok(models) => {
                 let _ = tx.send(ModelFetchEvent::Loaded(models));
@@ -1489,6 +1717,12 @@ fn cancel_model_fetch(app: &mut AppState) {
         fetch.handle.abort();
     }
     app.model_loading = false;
+}
+
+fn cancel_title_fetches(app: &mut AppState) {
+    for fetch in app.title_fetches.drain(..) {
+        fetch.handle.abort();
+    }
 }
 
 fn apply_selected_model(app: &mut AppState) {
@@ -1521,25 +1755,27 @@ fn apply_selected_model(app: &mut AppState) {
 fn help_rows() -> Vec<String> {
     vec![
         "Navigation".to_string(),
-        "  Tab: toggle focus between sessions and transcript".to_string(),
-        "  j/k or arrows: move/scroll in focused pane".to_string(),
-        "  gg / G: top / bottom in focused pane".to_string(),
-        "  Enter (sessions focus): switch session".to_string(),
-        "  dd (sessions focus): delete selected session (with confirmation)".to_string(),
+        "  j/k or arrows: scroll transcript".to_string(),
+        "  PageUp/PageDown: full-page scroll".to_string(),
+        "  Ctrl+u / Ctrl+d: half-page scroll".to_string(),
+        "  gg / G: top / bottom in transcript".to_string(),
         "".to_string(),
         "Composer".to_string(),
         "  i: enter insert mode, Enter: send, Esc: return to normal".to_string(),
         "".to_string(),
         "Commands".to_string(),
-        "  :new  :rename [title]  :delete  :models  :quit".to_string(),
+        "  :session  :models  :help  :quit".to_string(),
         "  ':' palette shows a picklist; use j/k (or arrows) + Enter".to_string(),
         "  :help or ? opens this panel".to_string(),
+        "".to_string(),
+        "Session manager (:session)".to_string(),
+        "  j/k move, Enter switch, n new, r rename, d delete, Esc close".to_string(),
         "".to_string(),
         "Global: Ctrl+C quits; Esc cancels in-flight stream in normal mode".to_string(),
     ]
 }
 
-const PALETTE_COMMANDS: &[&str] = &["help", "new", "rename", "delete", "models", "quit"];
+const PALETTE_COMMANDS: &[&str] = &["help", "session", "models", "quit"];
 
 fn palette_suggestions(input: &str) -> Vec<&'static str> {
     let trimmed = input
@@ -1592,11 +1828,6 @@ fn run_palette_selected_command(app: &mut AppState) -> bool {
     let selected = suggestions[app.command_selected_index.min(suggestions.len() - 1)];
 
     if trimmed.is_empty() {
-        if selected == "rename" {
-            app.command_input = "rename ".to_string();
-            app.status_message = "Type a title after :rename".to_string();
-            return false;
-        }
         app.command_input = selected.to_string();
         return run_palette_command(app);
     }
@@ -1610,11 +1841,6 @@ fn run_palette_selected_command(app: &mut AppState) -> bool {
     let is_exact = PALETTE_COMMANDS.iter().any(|item| *item == stem);
 
     if !has_args && !is_exact {
-        if selected == "rename" {
-            app.command_input = "rename ".to_string();
-            app.status_message = "Type a title after :rename".to_string();
-            return false;
-        }
         app.command_input = selected.to_string();
     }
 
@@ -1688,6 +1914,13 @@ struct OllamaChatRequest {
     stream: bool,
 }
 
+#[derive(Serialize)]
+struct OllamaGenerateRequest {
+    model: String,
+    prompt: String,
+    stream: bool,
+}
+
 #[derive(Deserialize)]
 struct OllamaChatChunk {
     message: Option<OllamaChunkMessage>,
@@ -1698,6 +1931,12 @@ struct OllamaChatChunk {
 #[derive(Deserialize)]
 struct OllamaChunkMessage {
     content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OllamaGenerateResponse {
+    response: Option<String>,
+    error: Option<String>,
 }
 
 async fn stream_ollama_chat(
@@ -1795,6 +2034,73 @@ async fn fetch_ollama_models(host: &str) -> Result<Vec<String>> {
     Ok(parsed.models.into_iter().map(|model| model.name).collect())
 }
 
+async fn generate_session_title(
+    host: &str,
+    model: &str,
+    first_user_message: &str,
+) -> Result<String> {
+    let prompt = format!(
+        "Create a concise session title from this user message.\nRules:\n- 3 to 6 words\n- Title Case\n- No quotes\n- No ending punctuation\n- Keep it specific\nReturn only the title.\n\nUser message:\n{}",
+        first_user_message.trim()
+    );
+    let request = OllamaGenerateRequest {
+        model: model.to_string(),
+        prompt,
+        stream: false,
+    };
+    let url = format!("{}/api/generate", host.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| anyhow!("HTTP send error for title generation: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "Title generation returned {}: {}",
+            resp.status(),
+            resp.text()
+                .await
+                .unwrap_or_else(|_| "<no body>".to_string())
+        ));
+    }
+    let parsed: OllamaGenerateResponse = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("Failed to parse title generation JSON: {e}"))?;
+    if let Some(error) = parsed.error
+        && !error.trim().is_empty()
+    {
+        return Err(anyhow!("Title generation error: {error}"));
+    }
+    Ok(parsed.response.unwrap_or_default())
+}
+
+fn normalize_generated_title(raw: &str) -> String {
+    let mut value = raw.lines().next().unwrap_or("").trim().to_string();
+    if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+        value = value[1..value.len() - 1].trim().to_string();
+    }
+    if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        value = value[1..value.len() - 1].trim().to_string();
+    }
+    value = value
+        .trim_matches(|ch: char| ch.is_ascii_punctuation())
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        return String::new();
+    }
+
+    const MAX_LEN: usize = 40;
+    let mut out = value.chars().take(MAX_LEN).collect::<String>();
+    while out.ends_with(char::is_whitespace) {
+        out.pop();
+    }
+    out
+}
+
 fn parse_and_emit_line(line: &str, tx: &mpsc::UnboundedSender<StreamEvent>) -> Result<()> {
     let parsed: OllamaChatChunk =
         serde_json::from_str(line).map_err(|e| anyhow!("Failed to parse stream JSON: {e}"))?;
@@ -1854,7 +2160,7 @@ fn run_palette_command(app: &mut AppState) -> bool {
         .to_string();
     let mut parts = raw_command.splitn(2, char::is_whitespace);
     let command = parts.next().unwrap_or("").to_ascii_lowercase();
-    let arg = parts.next().unwrap_or("").trim();
+    let _arg = parts.next().unwrap_or("").trim();
 
     app.command_input.clear();
     app.mode = InputMode::Normal;
@@ -1865,58 +2171,8 @@ fn run_palette_command(app: &mut AppState) -> bool {
             false
         }
         "quit" | "q" => true,
-        "new" => {
-            if app.is_busy() {
-                app.status_message =
-                    "Cannot reset while request is in progress. Press Esc to cancel first."
-                        .to_string();
-            } else {
-                match app.store.create_session() {
-                    Ok(session_id) => {
-                        app.active_session_id = session_id;
-                        app.messages.clear();
-                        app.model = app.default_model.clone();
-                        app.composer_input.clear();
-                        app.transcript_scroll = 0;
-                        app.transcript_follow = true;
-                        app.normal_focus = NormalFocus::Transcript;
-                        refresh_sessions(app, Some(session_id));
-                        app.status_message = format!("Started new session #{}.", session_id);
-                    }
-                    Err(err) => {
-                        app.status_message = format!("Failed to create session: {err}");
-                    }
-                }
-            }
-            false
-        }
-        "rename" => {
-            if app.is_busy() {
-                app.status_message =
-                    "Cannot rename while request is in progress. Press Esc to cancel first."
-                        .to_string();
-                return false;
-            }
-
-            let title = if arg.is_empty() { None } else { Some(arg) };
-            let outcome = app.store.rename_session(app.active_session_id, title);
-            match outcome {
-                Ok(()) => {
-                    refresh_sessions(app, Some(app.active_session_id));
-                    app.status_message = if let Some(value) = title {
-                        format!("Renamed active session to \"{}\".", value)
-                    } else {
-                        "Cleared active session title.".to_string()
-                    };
-                }
-                Err(err) => {
-                    app.status_message = format!("Failed to rename session: {err}");
-                }
-            }
-            false
-        }
-        "delete" => {
-            open_delete_confirmation_for_active_session(app);
+        "session" => {
+            open_session_manager(app);
             false
         }
         "models" => {
@@ -2040,7 +2296,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_command_opens_confirmation_and_help_excludes_archive() {
+    fn session_command_opens_manager_and_help_works() {
         let db_path = temp_db_path("palette-delete");
 
         {
@@ -2064,13 +2320,16 @@ mod tests {
             let original_active = loaded.session_id;
             let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
 
-            app.command_input = ":delete".to_string();
+            app.command_input = ":session".to_string();
             assert!(!run_palette_command(&mut app));
+            assert!(matches!(app.mode, InputMode::SessionManager));
+
+            open_delete_confirmation_for_selected_session(&mut app);
             assert!(matches!(app.mode, InputMode::ConfirmDelete));
             assert_eq!(app.pending_delete_session_id, Some(original_active));
 
             confirm_delete_session(&mut app);
-            assert!(matches!(app.mode, InputMode::Normal));
+            assert!(matches!(app.mode, InputMode::SessionManager));
             assert_ne!(app.active_session_id, original_active);
             assert!(
                 app.sessions
@@ -2096,18 +2355,9 @@ mod tests {
             let loaded = store.load_or_create_active_session().expect("load");
             let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
             app.mode = InputMode::CommandPalette;
-            let initial_active = app.active_session_id;
-
-            app.command_selected_index = 2; // rename
+            app.command_selected_index = 1; // session
             assert!(!run_palette_selected_command(&mut app));
-            assert_eq!(app.command_input, "rename ");
-            assert!(matches!(app.mode, InputMode::CommandPalette));
-
-            app.command_input.clear();
-            app.command_selected_index = 1; // new
-            assert!(!run_palette_selected_command(&mut app));
-            assert!(matches!(app.mode, InputMode::Normal));
-            assert_ne!(app.active_session_id, initial_active);
+            assert!(matches!(app.mode, InputMode::SessionManager));
 
             app.mode = InputMode::CommandPalette;
             app.command_input = "he".to_string();
@@ -2214,7 +2464,61 @@ mod tests {
         let title = suggest_session_title(
             "This is a very long request that should become a concise title for a session with truncation applied",
         );
-        assert!(title.len() <= 55);
+        assert!(title.len() <= 35);
         assert!(title.ends_with("..."));
+    }
+
+    #[test]
+    fn generated_title_is_normalized() {
+        let title = normalize_generated_title(" \"release checklist for mvp.\" \nextra");
+        assert_eq!(title, "release checklist for mvp");
+    }
+
+    #[test]
+    fn conditional_title_update_respects_expected_value() {
+        let db_path = temp_db_path("conditional-title-update");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open");
+            let session_id = store
+                .load_or_create_active_session()
+                .expect("load")
+                .session_id;
+
+            store
+                .rename_session(session_id, Some("Initial"))
+                .expect("seed title");
+            let changed = store
+                .rename_session_if_current_title(
+                    session_id,
+                    Some("Initial"),
+                    Some("Generated Title"),
+                )
+                .expect("conditional rename");
+            assert!(changed);
+
+            store
+                .rename_session(session_id, Some("Manual Override"))
+                .expect("manual rename");
+            let changed = store
+                .rename_session_if_current_title(
+                    session_id,
+                    Some("Generated Title"),
+                    Some("Should Not Apply"),
+                )
+                .expect("conditional rename no-op");
+            assert!(!changed);
+
+            let title = store
+                .list_sessions()
+                .expect("list")
+                .into_iter()
+                .find(|session| session.id == session_id)
+                .and_then(|session| session.title)
+                .expect("title");
+            assert_eq!(title, "Manual Override");
+        }
+
+        let _ = fs::remove_file(&db_path);
     }
 }

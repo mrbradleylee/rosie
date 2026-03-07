@@ -36,18 +36,12 @@ to enter
 mode; pressing
 .B Enter
 sends the composer content to Ollama, and assistant tokens stream into transcript as they arrive.
-.B Tab
-toggles focus between sessions and transcript panes.
 .B j
 /
 .B k
-(or arrow keys) move within the focused pane in
+(or arrow keys) scroll transcript in
 .B Normal
 mode.
-.B Enter
-on a focused session switches to that session.
-.B Sessions
-are listed newest-first. New sessions are auto-titled from the first user message using a concise local heuristic.
 .B PageUp
 /
 .B PageDown
@@ -60,10 +54,8 @@ perform half-page scrolling.
 jumps to top and
 .B G
 jumps to bottom.
-.B d
-then
-.B d
-in the sessions pane opens delete confirmation for the selected session.
+The header displays the active session title/id.
+New sessions are auto-titled from the first user message using a concise local heuristic, then refined with a model-generated title when available.
 .B Backspace
 edits input. Press
 .B Esc
@@ -75,9 +67,7 @@ in
 .B Normal
 to open the floating command panel (for example:
 .B :help ,
-.B :new ,
-.B :rename [title] ,
-.B :delete ,
+.B :session ,
 .B :models ,
 .B :quit
 ).
@@ -88,6 +78,22 @@ In the command panel, use
 (or arrow keys) to select from the command picklist and
 .B Enter
 to run.
+In session manager
+.RB ( :session ),
+use
+.B j
+/
+.B k
+to select,
+.B Enter
+to switch,
+.B n
+to create,
+.B r
+to rename,
+and
+.B d
+to delete (with confirmation).
 In the model picker, use
 .B j
 /

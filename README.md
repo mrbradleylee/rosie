@@ -79,22 +79,19 @@ In the default TUI:
 - in `Insert`, type in the composer, use `Backspace` to edit, and press `Enter` to send to Ollama
 - press `Esc` to return to `Normal`
 - assistant tokens stream into transcript as they arrive
-- press `Tab` in `Normal` to toggle focus between `Sessions` and `Transcript` panes
-- use `j`/`k` (or arrow keys) in `Normal` to move within the focused pane
+- use `j`/`k` (or arrow keys) in `Normal` to scroll transcript
 - use `PageUp`/`PageDown` for full-page scroll and `Ctrl+u`/`Ctrl+d` for half-page scroll
-- use `gg` to jump to top and `G` to jump to bottom
-- when `Sessions` is focused, press `Enter` to switch to the selected session
-- when `Sessions` is focused, press `d` then `d` to delete the selected session (with confirmation)
-- newest sessions appear at the top, and new sessions auto-title from the first user message using a concise local heuristic
+- use `gg` to jump to top and `G` to jump to bottom of transcript
+- header shows the active session title/id
+- new sessions auto-title from the first user message (local heuristic first, then model-refined when available)
 - press `?` in `Normal` (or run `:help`) to open the full key/command help panel
 - press `:` in `Normal` to open the floating command panel, then run:
   - `:help`
-  - `:new`
-  - `:rename [title]` (empty title clears it)
-  - `:delete`
+  - `:session` (open session manager modal)
   - `:models` (open model picker from Ollama `/api/tags` for the active session)
   - `:quit`
 - in the `:` command panel, use `j`/`k` (or arrows) to select from the command picklist and `Enter` to run
+- in session manager, use `j`/`k` to select and `Enter` switch, `n` new, `r` rename, `d` delete (with confirmation), `Esc` close
 - delete actions require confirmation (`[Y/n]`; `Enter` defaults to `Y`)
 - in the model picker, use `j`/`k` (or arrows) to move, `Enter` to apply, and `Esc` to cancel
 - selected models are persisted per session and restored when you switch sessions/restart

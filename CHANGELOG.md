@@ -8,18 +8,17 @@
 - Added mode-specific config keys `ask_model` and `cmd_model`, plus `execution_enabled` for `--cmd` execute control
 - Added default no-flag runtime path that launches a minimal TUI shell scaffold
 - Added TUI modal interaction with explicit `Normal`/`Insert` modes (`i` to enter input, `Esc` to return to normal)
-- Added floating `:` command panel in the TUI scaffold with initial commands (`:help`, `:new`, `:model`, `:quit`)
+- Added floating `:` command panel in the TUI scaffold with command execution and a picklist UX
 - Added Ollama-backed TUI chat requests from composer input (`Enter` in `Insert`), with assistant tokens streamed into transcript
 - Added transcript scrolling controls in TUI `Normal` mode (`j`/`k`, arrow keys, `PageUp`/`PageDown`, `Ctrl+u`/`Ctrl+d`, `gg`, `G`) with auto-follow to newest output during streaming
 - Added SQLite-backed TUI session persistence (`sessions` and `messages` tables), including startup load/auto-create of active session and transcript hydration on launch
-- Added interactive TUI session list behavior: pane focus toggle (`Tab`), keyboard selection (`j`/`k`, `gg`, `G`), and `Enter` to switch/load persisted sessions
-- Added TUI session management commands in `:` palette: `:rename [title]` and `:delete`
-- Added session delete confirmation modal (`[Y/n]`, default yes on Enter) used by both `:delete` and sessions-pane `dd`
-- Added TUI unit tests covering SQLite session persistence across restart, session switching, and confirmed session deletion flows (`dd` and `:delete`)
+- Added TUI unit tests covering SQLite session persistence across restart, session switching, and confirmed session deletion flows
 - Added `:models` TUI command with a floating model picker that loads available models from Ollama `/api/tags` and applies selection to the active session model
 - Added a command picklist in the `:` panel with keyboard selection (`j`/`k` or arrows) and `Enter` to run
 - Added session-scoped model persistence so each session can keep its own selected model and restore it on session switch/restart
 - Added automatic concise session title generation from the first user message in a new session (improved local heuristic)
+- Added asynchronous model-based session title refinement for new sessions, guarded to avoid overwriting manual renames
+- Added dedicated `:session` manager modal for session listing/switch/create/rename/delete workflows
 
 ### Changed
 
@@ -31,11 +30,9 @@
 - Updated `--configure` model prompts so numeric model selection works consistently for default, ask, and cmd model choices, with explicit confirm/reselect after resolving each choice
 - Updated TUI key behavior so `Esc` in `Normal` cancels in-flight requests and `Ctrl+C` quits from any mode
 - Updated TUI transcript/composer rendering to wrap and stay constrained to pane bounds
-- Updated TUI message flow to persist user and assistant messages as they arrive, including streamed assistant updates and `:new` creating a new persisted session
-- Updated sessions pane to render real persisted session data (active marker, selection marker, message counts) instead of placeholder text
+- Updated TUI message flow to persist user and assistant messages as they arrive, including streamed assistant updates
 - Updated `:help` command output to include the new session management commands
 - Updated README to document TUI session persistence, pane focus/session switching controls, and session-management palette commands
-- Updated TUI normal-mode help text to include `dd` for deleting the selected session
 - Updated man page (`rosie.1`) to reflect current TUI behavior, delete confirmation flow, and session DB file locations
 - Updated README and man page to document `:models` usage and model-picker controls
 - Updated TUI send/session-switch/new-session flows to re-focus transcript and follow newest output more reliably
@@ -44,13 +41,16 @@
 - Updated TUI footer help text to a compact set of core actions and moved full key/command guidance into a dedicated help modal (`?` / `:help`)
 - Updated TUI help/docs to remove `:model`, rely on header display plus `:models` for model changes, and document the command-panel picklist
 - Updated sessions list ordering to newest-first
-- Updated sessions pane rendering to include per-session model labels when set
+- Replaced split-pane session sidebar with a transcript-first layout and an on-demand session manager modal
+- Updated header/status display to show active session title/id directly in main UI
+- Updated command/help docs to route session actions through `:session` modal controls (`n/r/d/Enter`)
 
 ### Removed
 
 - Removed `.env` loading and runtime environment-variable overrides for host/model selection
 - Removed `dotenvy` dependency
 - Removed archive session command support from the TUI command palette
+- Removed `:new`, `:rename`, and `:delete` from the command palette in favor of `:session`
 
 ## 0.6.1
 
