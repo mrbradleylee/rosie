@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.0
+
 ### Changed
 
 - Simplified the TUI status header to focus on mode/streaming state and removed non-actionable host details
