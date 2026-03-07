@@ -160,6 +160,11 @@ title_label = "#e0def4"
 title_value = "#c4a7e7"
 title_value_alt = "#ebbcba"
 title_meta = "#908caa"
+modal_bg = "#1f1d2e"
+modal_border = "#524f67"
+modal_title = "#e0def4"
+modal_selected_bg = "#403d52"
+modal_selected_fg = "#e0def4"
 
 [state]
 accent = "#c4a7e7"

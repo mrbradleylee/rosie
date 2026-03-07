@@ -618,32 +618,72 @@ fn run_loop(
 
             if app.mode == InputMode::CommandPalette {
                 let popup = centered_rect(70, 12, frame.area());
-                let mut rows = Vec::new();
-                rows.push(format!(":{}", app.command_input));
-                rows.push(String::new());
-                rows.push("Commands (j/k or arrows to select, Enter to run):".to_string());
+                let mut rows: Vec<Line<'_>> = Vec::new();
+                rows.push(Line::from(vec![
+                    Span::styled(":", Style::default().fg(theme.title_meta)),
+                    Span::styled(
+                        app.command_input.clone(),
+                        Style::default().fg(theme.title_value_alt),
+                    ),
+                ]));
+                rows.push(Line::raw(""));
+                rows.push(Line::styled(
+                    "Commands (j/k or arrows to select, Enter to run):".to_string(),
+                    Style::default()
+                        .fg(theme.title_label)
+                        .add_modifier(Modifier::BOLD),
+                ));
                 let suggestions = palette_suggestions(&app.command_input);
                 if suggestions.is_empty() {
-                    rows.push("  (no matching commands)".to_string());
+                    rows.push(Line::styled(
+                        "  (no matching commands)".to_string(),
+                        Style::default().fg(theme.muted),
+                    ));
                 } else {
                     let selected = app
                         .command_selected_index
                         .min(suggestions.len().saturating_sub(1));
                     for (idx, item) in suggestions.iter().enumerate() {
                         let marker = if idx == selected { ">" } else { " " };
-                        rows.push(format!("{marker} {item}"));
+                        if idx == selected {
+                            let selected_fg = contrast_text_for_bg(theme.success, theme);
+                            rows.push(Line::from(vec![
+                                Span::styled(
+                                    marker.to_string(),
+                                    Style::default()
+                                        .fg(theme.modal_selected_bg)
+                                        .bg(theme.success)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    " ".to_string(),
+                                    Style::default().fg(selected_fg).bg(theme.success),
+                                ),
+                                Span::styled(
+                                    item.to_string(),
+                                    Style::default()
+                                        .fg(selected_fg)
+                                        .bg(theme.success)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                        } else {
+                            let item_color = if *item == "quit" {
+                                theme.warn
+                            } else {
+                                theme.text
+                            };
+                            rows.push(Line::from(vec![
+                                Span::styled(marker.to_string(), Style::default().fg(theme.muted)),
+                                Span::raw(" "),
+                                Span::styled(item.to_string(), Style::default().fg(item_color)),
+                            ]));
+                        }
                     }
                 }
-                let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
-                let command = Paragraph::new(lines)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Command")
-                            .style(Style::default().bg(theme.surface).fg(theme.text))
-                            .border_style(Style::default().fg(theme.accent)),
-                    )
-                    .style(Style::default().bg(theme.surface).fg(theme.text))
+                let command = Paragraph::new(rows)
+                    .block(modal_block(theme, "Command"))
+                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
                     .alignment(Alignment::Left)
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
@@ -651,16 +691,10 @@ fn run_loop(
             } else if app.mode == InputMode::SessionManager || app.mode == InputMode::SessionRename {
                 let popup = centered_rect(90, 18, frame.area());
                 let rows = session_manager_rows(&mut app, popup.height as usize);
-                let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
+                let lines = modal_lines_from_rows(&rows, theme);
                 let session_modal = Paragraph::new(lines)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Sessions")
-                            .style(Style::default().bg(theme.surface).fg(theme.text))
-                            .border_style(Style::default().fg(theme.accent)),
-                    )
-                    .style(Style::default().bg(theme.surface).fg(theme.text))
+                    .block(modal_block(theme, "Sessions"))
+                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
                     .alignment(Alignment::Left)
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
@@ -682,18 +716,28 @@ fn run_loop(
                     .pending_delete_session_id
                     .map(|id| format!("#{id}"))
                     .unwrap_or_else(|| "selected session".to_string());
-                let confirm = Paragraph::new(format!(
-                    "Delete session {target}?\nThis cannot be undone.\n[Y/n]"
-                ))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Confirm Delete")
-                        .style(Style::default().bg(theme.surface).fg(theme.text))
-                        .border_style(Style::default().fg(theme.error)),
-                )
-                .style(Style::default().bg(theme.surface).fg(theme.text))
-                .alignment(Alignment::Left);
+                let confirm_lines = vec![
+                    Line::styled(
+                        format!("Delete session {target}?"),
+                        Style::default()
+                            .fg(theme.warn)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Line::styled(
+                        "This cannot be undone.".to_string(),
+                        Style::default().fg(theme.error),
+                    ),
+                    Line::styled(
+                        "[Y/n]".to_string(),
+                        Style::default()
+                            .fg(theme.title_label)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                let confirm = Paragraph::new(confirm_lines)
+                    .block(modal_block(theme, "Confirm Delete"))
+                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
+                    .alignment(Alignment::Left);
                 frame.render_widget(Clear, popup);
                 frame.render_widget(confirm, popup);
             } else if app.mode == InputMode::ModelSelect {
@@ -719,16 +763,10 @@ fn run_loop(
                     }
                 }
 
-                let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
+                let lines = modal_lines_from_rows(&rows, theme);
                 let picker = Paragraph::new(lines)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Models")
-                            .style(Style::default().bg(theme.surface).fg(theme.text))
-                            .border_style(Style::default().fg(theme.accent)),
-                    )
-                    .style(Style::default().bg(theme.surface).fg(theme.text))
+                    .block(modal_block(theme, "Models"))
+                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
                     .alignment(Alignment::Left)
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
@@ -752,33 +790,20 @@ fn run_loop(
                         rows.push(format!("{marker}{active} {theme_name}"));
                     }
                 }
-                let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
+                let lines = modal_lines_from_rows(&rows, theme);
                 let picker = Paragraph::new(lines)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Themes")
-                            .style(Style::default().bg(theme.surface).fg(theme.text))
-                            .border_style(Style::default().fg(theme.accent)),
-                    )
-                    .style(Style::default().bg(theme.surface).fg(theme.text))
+                    .block(modal_block(theme, "Themes"))
+                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
                     .alignment(Alignment::Left)
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
                 frame.render_widget(picker, popup);
             } else if app.mode == InputMode::Help {
                 let popup = centered_rect(78, 16, frame.area());
-                let rows = help_rows();
-                let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
+                let lines = help_lines(theme);
                 let help = Paragraph::new(lines)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Help")
-                            .style(Style::default().bg(theme.surface).fg(theme.text))
-                            .border_style(Style::default().fg(theme.accent)),
-                    )
-                    .style(Style::default().bg(theme.surface).fg(theme.text))
+                    .block(modal_block(theme, "Help"))
+                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
                     .alignment(Alignment::Left)
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
@@ -1515,7 +1540,7 @@ fn active_session_title(app: &AppState) -> String {
 }
 
 fn session_manager_rows(app: &mut AppState, view_height: usize) -> Vec<String> {
-    let mut rows = vec!["Enter=switch n=new r=rename d=delete Esc=close".to_string()];
+    let mut rows = vec!["Enter to apply | [n] new [r] rename [d] delete | Esc close".to_string()];
     if app.mode == InputMode::SessionRename {
         rows.push(String::new());
         rows.push(format!("Rename: {}", app.session_rename_input));
@@ -2021,6 +2046,218 @@ fn help_rows() -> Vec<String> {
         "".to_string(),
         "Global: Ctrl+C quits; Esc cancels in-flight stream in normal mode".to_string(),
     ]
+}
+
+fn help_lines(theme: ThemePalette) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for row in help_rows() {
+        if row.is_empty() {
+            lines.push(Line::raw(""));
+        } else if !row.starts_with("  ") {
+            lines.push(Line::styled(
+                row,
+                Style::default()
+                    .fg(theme.title_label)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else if row.trim_start().starts_with(':') {
+            lines.push(Line::styled(
+                row,
+                Style::default().fg(theme.title_value_alt),
+            ));
+        } else {
+            lines.push(Line::styled(row, Style::default().fg(theme.text)));
+        }
+    }
+    lines
+}
+
+fn modal_block(theme: ThemePalette, title: &str) -> Block<'_> {
+    Block::default()
+        .title(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(theme.modal_title)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.modal_border))
+        .style(Style::default().bg(theme.modal_bg))
+}
+
+fn modal_lines_from_rows(rows: &[String], theme: ThemePalette) -> Vec<Line<'_>> {
+    rows.iter()
+        .map(|row| modal_line_from_row(row, theme))
+        .collect()
+}
+
+fn modal_line_from_row(row: &str, theme: ThemePalette) -> Line<'_> {
+    if row.is_empty() {
+        return Line::raw("");
+    }
+
+    if row.starts_with('>') {
+        let selected_fg = contrast_text_for_bg(theme.success, theme);
+        let rest = row.chars().skip(1).collect::<String>();
+        return Line::from(vec![
+            Span::styled(
+                ">".to_string(),
+                Style::default()
+                    .fg(theme.modal_selected_bg)
+                    .bg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                rest,
+                Style::default()
+                    .fg(selected_fg)
+                    .bg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+    }
+
+    if row.starts_with("Failed to load") {
+        return Line::styled(row.to_string(), Style::default().fg(theme.error));
+    }
+    if row.starts_with("Loading ") {
+        return Line::styled(row.to_string(), Style::default().fg(theme.info));
+    }
+    if row.starts_with("No ") {
+        return Line::styled(row.to_string(), Style::default().fg(theme.muted));
+    }
+    if row == "Enter to apply | [n] new [r] rename [d] delete | Esc close" {
+        return Line::from(vec![
+            Span::styled(
+                "Enter to apply".to_string(),
+                Style::default()
+                    .fg(theme.title_label)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" | ".to_string(), Style::default().fg(theme.title_meta)),
+            Span::styled("[n] new".to_string(), Style::default().fg(theme.success)),
+            Span::styled(" ".to_string(), Style::default().fg(theme.title_meta)),
+            Span::styled("[r] rename".to_string(), Style::default().fg(theme.warn)),
+            Span::styled(" ".to_string(), Style::default().fg(theme.title_meta)),
+            Span::styled("[d] delete".to_string(), Style::default().fg(theme.error)),
+            Span::styled(
+                " | Esc close".to_string(),
+                Style::default().fg(theme.title_meta),
+            ),
+        ]);
+    }
+    if row.starts_with("Select a ")
+        || row.starts_with("Commands (")
+        || row.starts_with("Enter=switch ")
+    {
+        return Line::styled(
+            row.to_string(),
+            Style::default()
+                .fg(theme.title_label)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+    if let Some(rename_value) = row.strip_prefix("Rename: ") {
+        return Line::from(vec![
+            Span::styled(
+                "Rename: ".to_string(),
+                Style::default()
+                    .fg(theme.title_label)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                rename_value.to_string(),
+                Style::default().fg(theme.title_value),
+            ),
+        ]);
+    }
+
+    let mut chars = row.chars();
+    let selected = chars.next();
+    let active = chars.next();
+    let remainder: String = chars.collect();
+    if matches!(selected, Some(' ')) && matches!(active, Some('*') | Some(' ')) {
+        let active_color = if active == Some('*') {
+            theme.title_value
+        } else {
+            theme.title_meta
+        };
+        return Line::from(vec![
+            Span::styled(" ".to_string(), Style::default().fg(theme.title_meta)),
+            Span::styled(
+                active.unwrap_or(' ').to_string(),
+                Style::default()
+                    .fg(active_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(remainder, Style::default().fg(theme.text)),
+        ]);
+    }
+
+    Line::styled(row.to_string(), Style::default().fg(theme.text))
+}
+
+fn contrast_text_for_bg(bg: Color, theme: ThemePalette) -> Color {
+    let candidates = [theme.text, theme.base, theme.modal_selected_fg];
+    let mut best = candidates[0];
+    let mut best_ratio = contrast_ratio(bg, best);
+    for candidate in candidates.iter().copied().skip(1) {
+        let ratio = contrast_ratio(bg, candidate);
+        if ratio > best_ratio {
+            best = candidate;
+            best_ratio = ratio;
+        }
+    }
+    best
+}
+
+fn contrast_ratio(a: Color, b: Color) -> f32 {
+    let la = relative_luminance(a);
+    let lb = relative_luminance(b);
+    if la > lb {
+        (la + 0.05) / (lb + 0.05)
+    } else {
+        (lb + 0.05) / (la + 0.05)
+    }
+}
+
+fn relative_luminance(color: Color) -> f32 {
+    let (r, g, b) = color_to_rgb(color);
+    let r_lin = srgb_channel_to_linear(r as f32 / 255.0);
+    let g_lin = srgb_channel_to_linear(g as f32 / 255.0);
+    let b_lin = srgb_channel_to_linear(b as f32 / 255.0);
+    0.2126 * r_lin + 0.7152 * g_lin + 0.0722 * b_lin
+}
+
+fn srgb_channel_to_linear(value: f32) -> f32 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn color_to_rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Black => (0, 0, 0),
+        Color::Red => (128, 0, 0),
+        Color::Green => (0, 128, 0),
+        Color::Yellow => (128, 128, 0),
+        Color::Blue => (0, 0, 128),
+        Color::Magenta => (128, 0, 128),
+        Color::Cyan => (0, 128, 128),
+        Color::Gray => (192, 192, 192),
+        Color::DarkGray => (128, 128, 128),
+        Color::LightRed => (255, 0, 0),
+        Color::LightGreen => (0, 255, 0),
+        Color::LightYellow => (255, 255, 0),
+        Color::LightBlue => (0, 0, 255),
+        Color::LightMagenta => (255, 0, 255),
+        Color::LightCyan => (0, 255, 255),
+        Color::White => (255, 255, 255),
+        _ => (255, 255, 255),
+    }
 }
 
 const PALETTE_COMMANDS: &[&str] = &["help", "session", "models", "theme", "quit"];

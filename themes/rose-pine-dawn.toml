@@ -12,6 +12,11 @@ title_label = "#d7827e"
 title_value = "#286983"
 title_value_alt = "#ea9d34"
 title_meta = "#797593"
+modal_bg = "#fffaf3"
+modal_border = "#9893a5"
+modal_title = "#575279"
+modal_selected_bg = "#dfdad9"
+modal_selected_fg = "#575279"
 
 [state]
 accent = "#907aa9"

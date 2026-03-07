@@ -35,6 +35,11 @@ pub fn default_theme() -> ResolvedTheme {
                 title_value: Color::Rgb(196, 167, 231),
                 title_value_alt: Color::Rgb(235, 188, 186),
                 title_meta: Color::Rgb(144, 140, 170),
+                modal_bg: Color::Rgb(31, 29, 46),
+                modal_border: Color::Rgb(82, 79, 103),
+                modal_title: Color::Rgb(224, 222, 244),
+                modal_selected_bg: Color::Rgb(64, 61, 82),
+                modal_selected_fg: Color::Rgb(224, 222, 244),
             },
         },
     }
@@ -64,6 +69,11 @@ pub struct ThemePalette {
     pub title_value: Color,
     pub title_value_alt: Color,
     pub title_meta: Color,
+    pub modal_bg: Color,
+    pub modal_border: Color,
+    pub modal_title: Color,
+    pub modal_selected_bg: Color,
+    pub modal_selected_fg: Color,
 }
 
 pub struct ResolvedTheme {
@@ -97,6 +107,11 @@ struct ThemeFileUi {
     title_value: Option<String>,
     title_value_alt: Option<String>,
     title_meta: Option<String>,
+    modal_bg: Option<String>,
+    modal_border: Option<String>,
+    modal_title: Option<String>,
+    modal_selected_bg: Option<String>,
+    modal_selected_fg: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -233,6 +248,36 @@ fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
             .map(parse_hex_color)
             .transpose()?
             .unwrap_or(muted);
+        let modal_bg = ui
+            .modal_bg
+            .as_deref()
+            .map(parse_hex_color)
+            .transpose()?
+            .unwrap_or(surface);
+        let modal_border = ui
+            .modal_border
+            .as_deref()
+            .map(parse_hex_color)
+            .transpose()?
+            .unwrap_or(border_active);
+        let modal_title = ui
+            .modal_title
+            .as_deref()
+            .map(parse_hex_color)
+            .transpose()?
+            .unwrap_or(title_label);
+        let modal_selected_bg = ui
+            .modal_selected_bg
+            .as_deref()
+            .map(parse_hex_color)
+            .transpose()?
+            .unwrap_or(highlight_mid);
+        let modal_selected_fg = ui
+            .modal_selected_fg
+            .as_deref()
+            .map(parse_hex_color)
+            .transpose()?
+            .unwrap_or(text);
         return Ok(ThemePalette {
             base,
             surface,
@@ -256,6 +301,11 @@ fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
             title_value,
             title_value_alt,
             title_meta,
+            modal_bg,
+            modal_border,
+            modal_title,
+            modal_selected_bg,
+            modal_selected_fg,
         });
     }
 
@@ -295,6 +345,11 @@ fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
             title_value: accent,
             title_value_alt: accent,
             title_meta: muted,
+            modal_bg: surface,
+            modal_border: border_active,
+            modal_title: text,
+            modal_selected_bg: border,
+            modal_selected_fg: text,
         });
     }
 

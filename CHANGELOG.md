@@ -24,6 +24,8 @@
 - Updated bundled Rose Pine variant theme files to increase title/value contrast via theme tokens
 - Updated `--install` to copy bundled `themes/*.toml` into `${XDG_CONFIG_HOME:-~/.config}/rosie/themes`
 - Added `state.info` and `ui.title_value_alt` theme tokens for richer neutral-semantic theming (e.g., streaming/info states and secondary title values like model)
+- Themed all TUI modal windows (command/session/model/theme/help/confirm) with semantic modal tokens and selectable-row styling from theme files
+- Extended modal content theming to style headings, prompts, warnings/errors, active entries, and help sections via existing semantic theme tokens
 
 ## 0.7.0
 
