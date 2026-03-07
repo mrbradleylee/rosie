@@ -49,7 +49,9 @@ struct AppState {
     transcript_view_width: usize,
     transcript_view_height: usize,
     pending_g: bool,
+    pending_d: bool,
     in_flight: Option<InFlightRequest>,
+    pending_delete_session_id: Option<i64>,
     status_message: String,
 }
 
@@ -80,7 +82,9 @@ impl AppState {
             transcript_view_width: 1,
             transcript_view_height: 1,
             pending_g: false,
+            pending_d: false,
             in_flight: None,
+            pending_delete_session_id: None,
             status_message: format!(
                 "Loaded session #{}. Press i to enter Insert mode.",
                 active_session_id
@@ -104,6 +108,7 @@ enum InputMode {
     Normal,
     Insert,
     CommandPalette,
+    ConfirmDelete,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -165,7 +170,7 @@ impl SessionStore {
         let session_id = self
             .conn
             .query_row(
-                "SELECT id FROM sessions WHERE is_archived = 0 ORDER BY updated_at DESC, id DESC LIMIT 1",
+                "SELECT id FROM sessions ORDER BY updated_at DESC, id DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )
@@ -208,7 +213,6 @@ impl SessionStore {
             SELECT s.id, s.title, COUNT(m.id) AS message_count
             FROM sessions s
             LEFT JOIN messages m ON m.session_id = s.id
-            WHERE s.is_archived = 0
             GROUP BY s.id
             ORDER BY s.updated_at DESC, s.id DESC
             ",
@@ -262,14 +266,6 @@ impl SessionStore {
         self.conn.execute(
             "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
             params![title, unix_timestamp(), session_id],
-        )?;
-        Ok(())
-    }
-
-    fn archive_session(&self, session_id: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET is_archived = 1, updated_at = ?1 WHERE id = ?2",
-            params![unix_timestamp(), session_id],
         )?;
         Ok(())
     }
@@ -341,6 +337,7 @@ fn run_loop(
                 InputMode::Normal => "NORMAL",
                 InputMode::Insert => "INSERT",
                 InputMode::CommandPalette => "COMMAND",
+                InputMode::ConfirmDelete => "CONFIRM",
             };
             let header = Paragraph::new(format!(
                 "Rosie TUI | Mode: {mode_label} | Host: {} | Model: {}{}",
@@ -411,13 +408,14 @@ fn run_loop(
             let footer_help = match app.mode {
                 InputMode::Normal => {
                     if app.is_busy() {
-                        "Tab: focus pane | j/k: move | Enter: switch session | i: insert (disabled) | : commands | Esc: cancel stream | Ctrl+C: quit"
+                        "Tab: focus pane | j/k: move | Enter: switch session | dd: delete selected session | i: insert (disabled) | : commands | Esc: cancel stream | Ctrl+C: quit"
                     } else {
-                        "Tab: focus pane | j/k: move | Enter: switch session | i: insert | : commands | Ctrl+C: quit"
+                        "Tab: focus pane | j/k: move | Enter: switch session | dd: delete selected session | i: insert | : commands | Ctrl+C: quit"
                     }
                 }
                 InputMode::Insert => "Enter: send | Backspace: edit | Esc: normal",
                 InputMode::CommandPalette => "Type command | Enter: run | Esc: cancel",
+                InputMode::ConfirmDelete => "Confirm delete: Enter/y=yes, n/Esc=no",
             };
             let footer = Paragraph::new(format!("{} | {}", footer_help, app.status_message))
                 .style(Style::default().add_modifier(Modifier::DIM));
@@ -430,6 +428,19 @@ fn run_loop(
                     .alignment(Alignment::Left);
                 frame.render_widget(Clear, popup);
                 frame.render_widget(command, popup);
+            } else if app.mode == InputMode::ConfirmDelete {
+                let popup = centered_rect(60, 5, frame.area());
+                let target = app
+                    .pending_delete_session_id
+                    .map(|id| format!("#{id}"))
+                    .unwrap_or_else(|| "selected session".to_string());
+                let confirm = Paragraph::new(format!(
+                    "Delete session {target}?\nThis cannot be undone.\n[Y/n]"
+                ))
+                .block(Block::default().borders(Borders::ALL).title("Confirm Delete"))
+                .alignment(Alignment::Left);
+                frame.render_widget(Clear, popup);
+                frame.render_widget(confirm, popup);
             }
         })?;
 
@@ -446,6 +457,7 @@ fn run_loop(
                 InputMode::Normal => match key.code {
                     KeyCode::Tab => {
                         app.pending_g = false;
+                        app.pending_d = false;
                         app.normal_focus = match app.normal_focus {
                             NormalFocus::Transcript => NormalFocus::Sessions,
                             NormalFocus::Sessions => NormalFocus::Transcript,
@@ -457,6 +469,7 @@ fn run_loop(
                     }
                     KeyCode::Enter => {
                         app.pending_g = false;
+                        app.pending_d = false;
                         if app.normal_focus == NormalFocus::Sessions {
                             switch_to_selected_session(&mut app);
                         }
@@ -467,6 +480,7 @@ fn run_loop(
                             scroll_transcript_down(&mut app, page);
                         }
                         app.pending_g = false;
+                        app.pending_d = false;
                     }
                     KeyCode::PageUp => {
                         let page = app.transcript_view_height as u16;
@@ -474,6 +488,7 @@ fn run_loop(
                             scroll_transcript_up(&mut app, page);
                         }
                         app.pending_g = false;
+                        app.pending_d = false;
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
                         if app.normal_focus == NormalFocus::Sessions {
@@ -482,6 +497,7 @@ fn run_loop(
                             scroll_transcript_down(&mut app, 1);
                         }
                         app.pending_g = false;
+                        app.pending_d = false;
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
                         if app.normal_focus == NormalFocus::Sessions {
@@ -490,6 +506,7 @@ fn run_loop(
                             scroll_transcript_up(&mut app, 1);
                         }
                         app.pending_g = false;
+                        app.pending_d = false;
                     }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if app.normal_focus == NormalFocus::Transcript {
@@ -497,6 +514,7 @@ fn run_loop(
                             scroll_transcript_down(&mut app, half_page);
                         }
                         app.pending_g = false;
+                        app.pending_d = false;
                     }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if app.normal_focus == NormalFocus::Transcript {
@@ -504,6 +522,7 @@ fn run_loop(
                             scroll_transcript_up(&mut app, half_page);
                         }
                         app.pending_g = false;
+                        app.pending_d = false;
                     }
                     KeyCode::Char('G') => {
                         if app.normal_focus == NormalFocus::Sessions {
@@ -512,8 +531,10 @@ fn run_loop(
                             scroll_transcript_to_bottom(&mut app);
                         }
                         app.pending_g = false;
+                        app.pending_d = false;
                     }
                     KeyCode::Char('g') => {
+                        app.pending_d = false;
                         if app.pending_g {
                             if app.normal_focus == NormalFocus::Sessions {
                                 move_session_selection_to_top(&mut app);
@@ -526,8 +547,22 @@ fn run_loop(
                             app.status_message = "g pressed. Press g again for top.".to_string();
                         }
                     }
+                    KeyCode::Char('d') => {
+                        app.pending_g = false;
+                        if app.normal_focus != NormalFocus::Sessions {
+                            app.pending_d = false;
+                        } else if app.pending_d {
+                            app.pending_d = false;
+                            open_delete_confirmation_for_selected_session(&mut app);
+                        } else {
+                            app.pending_d = true;
+                            app.status_message =
+                                "d pressed. Press d again to delete selected session.".to_string();
+                        }
+                    }
                     KeyCode::Char('i') => {
                         app.pending_g = false;
+                        app.pending_d = false;
                         if app.is_busy() {
                             app.status_message =
                                 "Wait for streaming to finish or press Esc to cancel.".to_string();
@@ -538,23 +573,27 @@ fn run_loop(
                     }
                     KeyCode::Char(':') => {
                         app.pending_g = false;
+                        app.pending_d = false;
                         app.mode = InputMode::CommandPalette;
                         app.command_input.clear();
                         app.status_message = "Command palette open.".to_string();
                     }
                     KeyCode::Esc => {
                         app.pending_g = false;
+                        app.pending_d = false;
                         if app.is_busy() {
                             cancel_request(&mut app, false);
                         }
                     }
                     _ => {
                         app.pending_g = false;
+                        app.pending_d = false;
                     }
                 },
                 InputMode::Insert => match key.code {
                     KeyCode::Esc => {
                         app.pending_g = false;
+                        app.pending_d = false;
                         app.mode = InputMode::Normal;
                         app.status_message = "Normal mode.".to_string();
                     }
@@ -572,6 +611,7 @@ fn run_loop(
                 InputMode::CommandPalette => match key.code {
                     KeyCode::Esc => {
                         app.pending_g = false;
+                        app.pending_d = false;
                         app.mode = InputMode::Normal;
                         app.command_input.clear();
                         app.status_message = "Command cancelled.".to_string();
@@ -587,6 +627,17 @@ fn run_loop(
                     }
                     KeyCode::Char(ch) => {
                         app.command_input.push(ch);
+                    }
+                    _ => {}
+                },
+                InputMode::ConfirmDelete => match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        confirm_delete_session(&mut app);
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        app.pending_delete_session_id = None;
+                        app.mode = InputMode::Normal;
+                        app.status_message = "Delete cancelled.".to_string();
                     }
                     _ => {}
                 },
@@ -913,6 +964,75 @@ fn activate_session_or_create(
     Ok(target_id)
 }
 
+fn open_delete_confirmation_for_selected_session(app: &mut AppState) {
+    if app.is_busy() {
+        app.status_message =
+            "Cannot delete while request is in progress. Press Esc to cancel first.".to_string();
+        return;
+    }
+
+    let Some(selected) = app.sessions.get(app.selected_session_index) else {
+        app.status_message = "No session selected.".to_string();
+        return;
+    };
+
+    app.pending_delete_session_id = Some(selected.id);
+    app.mode = InputMode::ConfirmDelete;
+    app.status_message = format!("Confirm delete session #{}.", selected.id);
+}
+
+fn open_delete_confirmation_for_active_session(app: &mut AppState) {
+    if app.is_busy() {
+        app.status_message =
+            "Cannot delete while request is in progress. Press Esc to cancel first.".to_string();
+        return;
+    }
+    app.pending_delete_session_id = Some(app.active_session_id);
+    app.mode = InputMode::ConfirmDelete;
+    app.status_message = format!("Confirm delete session #{}.", app.active_session_id);
+}
+
+fn confirm_delete_session(app: &mut AppState) {
+    let Some(deleted_id) = app.pending_delete_session_id.take() else {
+        app.mode = InputMode::Normal;
+        app.status_message = "No session selected for deletion.".to_string();
+        return;
+    };
+
+    let was_active = deleted_id == app.active_session_id;
+    match app.store.delete_session(deleted_id) {
+        Ok(()) => {
+            let preferred = if was_active {
+                None
+            } else {
+                Some(app.active_session_id)
+            };
+            match activate_session_or_create(app, preferred) {
+                Ok(new_active_id) => {
+                    app.mode = InputMode::Normal;
+                    if was_active {
+                        app.status_message = format!(
+                            "Deleted session #{}. Active session is now #{}.",
+                            deleted_id, new_active_id
+                        );
+                    } else {
+                        app.status_message = format!("Deleted session #{}.", deleted_id);
+                    }
+                }
+                Err(err) => {
+                    app.mode = InputMode::Normal;
+                    app.status_message =
+                        format!("Deleted session, but failed to load replacement: {err}");
+                }
+            }
+        }
+        Err(err) => {
+            app.mode = InputMode::Normal;
+            app.status_message = format!("Failed to delete session: {err}");
+        }
+    }
+}
+
 fn transcript_rows(messages: &[ChatMessage]) -> Vec<String> {
     if messages.is_empty() {
         return vec!["No messages yet. Press i, type, then Enter.".to_string()];
@@ -1187,66 +1307,8 @@ fn run_palette_command(app: &mut AppState) -> bool {
             }
             false
         }
-        "archive" => {
-            if app.is_busy() {
-                app.status_message =
-                    "Cannot archive while request is in progress. Press Esc to cancel first."
-                        .to_string();
-                return false;
-            }
-
-            let archived_id = app.active_session_id;
-            match app.store.archive_session(archived_id) {
-                Ok(()) => match activate_session_or_create(app, None) {
-                    Ok(new_active_id) => {
-                        if new_active_id == archived_id {
-                            app.status_message =
-                                "Archived session, but it remained active unexpectedly."
-                                    .to_string();
-                        } else {
-                            app.status_message = format!(
-                                "Archived session #{}. Active session is now #{}.",
-                                archived_id, new_active_id
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        app.status_message =
-                            format!("Archived session, but failed to load replacement: {err}");
-                    }
-                },
-                Err(err) => {
-                    app.status_message = format!("Failed to archive session: {err}");
-                }
-            }
-            false
-        }
         "delete" => {
-            if app.is_busy() {
-                app.status_message =
-                    "Cannot delete while request is in progress. Press Esc to cancel first."
-                        .to_string();
-                return false;
-            }
-
-            let deleted_id = app.active_session_id;
-            match app.store.delete_session(deleted_id) {
-                Ok(()) => match activate_session_or_create(app, None) {
-                    Ok(new_active_id) => {
-                        app.status_message = format!(
-                            "Deleted session #{}. Active session is now #{}.",
-                            deleted_id, new_active_id
-                        );
-                    }
-                    Err(err) => {
-                        app.status_message =
-                            format!("Deleted session, but failed to load replacement: {err}");
-                    }
-                },
-                Err(err) => {
-                    app.status_message = format!("Failed to delete session: {err}");
-                }
-            }
+            open_delete_confirmation_for_active_session(app);
             false
         }
         "model" => {
@@ -1255,12 +1317,163 @@ fn run_palette_command(app: &mut AppState) -> bool {
         }
         "help" => {
             app.status_message =
-                "Commands: :help :new :rename [title] :archive :delete :model :quit".to_string();
+                "Commands: :help :new :rename [title] :delete :model :quit".to_string();
             false
         }
         _ => {
             app.status_message = format!("Unknown command: :{command}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_db_path(test_name: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("rosie-{test_name}-{ts}-{n}.sqlite3"))
+    }
+
+    fn build_app_from_store(
+        store: SessionStore,
+        active_session_id: i64,
+        messages: Vec<ChatMessage>,
+    ) -> AppState {
+        let sessions = store.list_sessions().expect("list sessions");
+        let selected_session_index = sessions
+            .iter()
+            .position(|session| session.id == active_session_id)
+            .unwrap_or(0);
+        AppState::new(
+            "http://localhost:11434",
+            "test-model",
+            store,
+            active_session_id,
+            messages,
+            sessions,
+            selected_session_index,
+        )
+    }
+
+    #[test]
+    fn persists_messages_across_restart_and_deletes_selected_session_with_confirmation() {
+        let db_path = temp_db_path("persist-switch-delete");
+        let (session_one, session_two);
+
+        {
+            let store = SessionStore::open(&db_path).expect("open store");
+            session_one = store
+                .load_or_create_active_session()
+                .expect("load or create")
+                .session_id;
+            store
+                .insert_message(session_one, "user", "hello from session one")
+                .expect("insert user");
+            store
+                .insert_message(session_one, "assistant", "response one")
+                .expect("insert assistant");
+
+            session_two = store.create_session().expect("create second session");
+            store
+                .insert_message(session_two, "user", "hello from session two")
+                .expect("insert second session message");
+        }
+
+        {
+            let store = SessionStore::open(&db_path).expect("reopen store");
+            let loaded = store.load_or_create_active_session().expect("load session");
+            assert_eq!(loaded.session_id, session_two);
+
+            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+
+            app.selected_session_index = app
+                .sessions
+                .iter()
+                .position(|session| session.id == session_one)
+                .expect("session one in list");
+            switch_to_selected_session(&mut app);
+
+            assert_eq!(app.active_session_id, session_one);
+            assert!(
+                app.messages
+                    .iter()
+                    .any(|m| m.content.contains("hello from session one"))
+            );
+
+            app.selected_session_index = app
+                .sessions
+                .iter()
+                .position(|session| session.id == session_two)
+                .expect("session two in list");
+            open_delete_confirmation_for_selected_session(&mut app);
+            assert!(matches!(app.mode, InputMode::ConfirmDelete));
+            assert_eq!(app.pending_delete_session_id, Some(session_two));
+
+            confirm_delete_session(&mut app);
+
+            assert!(matches!(app.mode, InputMode::Normal));
+            assert_eq!(app.active_session_id, session_one);
+            assert!(app.sessions.iter().all(|session| session.id != session_two));
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn delete_command_opens_confirmation_and_help_excludes_archive() {
+        let db_path = temp_db_path("palette-delete");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open store");
+            let first = store
+                .load_or_create_active_session()
+                .expect("load")
+                .session_id;
+            let second = store.create_session().expect("create second session");
+            store
+                .insert_message(first, "user", "first")
+                .expect("insert first");
+            store
+                .insert_message(second, "user", "second")
+                .expect("insert second");
+        }
+
+        {
+            let store = SessionStore::open(&db_path).expect("reopen store");
+            let loaded = store.load_or_create_active_session().expect("load active");
+            let original_active = loaded.session_id;
+            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+
+            app.command_input = ":delete".to_string();
+            assert!(!run_palette_command(&mut app));
+            assert!(matches!(app.mode, InputMode::ConfirmDelete));
+            assert_eq!(app.pending_delete_session_id, Some(original_active));
+
+            confirm_delete_session(&mut app);
+            assert!(matches!(app.mode, InputMode::Normal));
+            assert_ne!(app.active_session_id, original_active);
+            assert!(
+                app.sessions
+                    .iter()
+                    .all(|session| session.id != original_active)
+            );
+
+            app.command_input = ":help".to_string();
+            assert!(!run_palette_command(&mut app));
+            assert!(!app.status_message.contains(":archive"));
+        }
+
+        let _ = fs::remove_file(&db_path);
     }
 }

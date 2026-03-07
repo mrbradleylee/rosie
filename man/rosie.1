@@ -26,8 +26,8 @@ When run without
 .B --ask
 or
 .B --cmd,
-Rosie launches a minimal TUI shell scaffold while full TUI support is under development.
-In the scaffold, Rosie starts in
+Rosie launches the full-screen TUI chat interface with sessions, transcript, and composer panes.
+In TUI mode, Rosie starts in
 .B Normal
 mode. Press
 .B i
@@ -36,12 +36,16 @@ to enter
 mode; pressing
 .B Enter
 sends the composer content to Ollama, and assistant tokens stream into transcript as they arrive.
+.B Tab
+toggles focus between sessions and transcript panes.
 .B j
 /
 .B k
-(or arrow keys) scroll transcript in
+(or arrow keys) move within the focused pane in
 .B Normal
 mode.
+.B Enter
+on a focused session switches to that session.
 .B PageUp
 /
 .B PageDown
@@ -54,6 +58,10 @@ perform half-page scrolling.
 jumps to top and
 .B G
 jumps to bottom.
+.B d
+then
+.B d
+in the sessions pane opens delete confirmation for the selected session.
 .B Backspace
 edits input. Press
 .B Esc
@@ -63,13 +71,20 @@ mode. Press
 .B :
 in
 .B Normal
-to open the floating command panel (for example,
+to open the floating command panel (for example:
 .B :help ,
 .B :new ,
+.B :rename [title] ,
+.B :delete ,
 .B :model ,
-or
 .B :quit
-). Press
+).
+Delete actions require confirmation with
+.B [Y/n]
+(press
+.B Enter
+for yes).
+Press
 .B Esc
 in
 .B Normal
@@ -154,6 +169,14 @@ first local Ollama model discovered via
 .I ~/.config/rosie/config.toml
 Persistent local configuration written by
 .BR rosie " --configure" .
+.TP
+.I ${XDG_DATA_HOME}/rosie/sessions.sqlite3
+Session/message persistence database used by TUI mode.
+.TP
+.I ~/.local/share/rosie/sessions.sqlite3
+Default TUI session database path when
+.B XDG_DATA_HOME
+is unset.
 .TP
 .I ~/.local/bin/rosie
 Default install location for the executable when

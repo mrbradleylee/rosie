@@ -4,12 +4,13 @@ Rosie is a Rust CLI that can either:
 - run quick one-shot chat (`--ask`), or
 - generate shell commands (`--cmd`) with an interactive execute/re-enter/quit loop.
 
-Running `rosie` with no mode flag launches a minimal TUI shell scaffold (sessions/transcript/composer panes) while full chat functionality is under development.
+Running `rosie` with no mode flag launches the full-screen TUI chat interface (sessions/transcript/composer panes).
 
 ## Features
 
 - `--ask` quick chat mode for one-shot responses
 - `--cmd` command-generation mode with existing `e/r/q` interactive flow
+- Default no-flag TUI chat mode with persisted local sessions
 - `--model <MODEL>` runtime model override for both `--ask` and `--cmd`
 - Config-driven Ollama host/model defaults in `~/.config/rosie/config.toml`
 - Interactive `--configure` flow with model discovery from Ollama
@@ -40,7 +41,7 @@ By default Rosie installs itself into `~/.local/bin/rosie` (or `$XDG_BIN_HOME/ro
 ## Usage
 
 ```bash
-# Default entrypoint (minimal TUI shell)
+# Default entrypoint (TUI chat mode)
 rosie
 
 # Configure Ollama host and model defaults
@@ -72,20 +73,33 @@ In `--cmd` mode on interactive terminals, Rosie prints a generated command + sum
 
 In `--ask` mode, Rosie prints the model response once and exits.
 
-In the default TUI scaffold:
+In the default TUI:
 - `Normal` mode starts by default
 - press `i` to enter `Insert` mode
 - in `Insert`, type in the composer, use `Backspace` to edit, and press `Enter` to send to Ollama
 - press `Esc` to return to `Normal`
 - assistant tokens stream into transcript as they arrive
-- use `j`/`k` (or arrow keys) in `Normal` to scroll transcript
+- press `Tab` in `Normal` to toggle focus between `Sessions` and `Transcript` panes
+- use `j`/`k` (or arrow keys) in `Normal` to move within the focused pane
 - use `PageUp`/`PageDown` for full-page scroll and `Ctrl+u`/`Ctrl+d` for half-page scroll
 - use `gg` to jump to top and `G` to jump to bottom
-- press `:` in `Normal` to open the floating command panel, then run commands like `:help`, `:new`, `:model`, and `:quit`
+- when `Sessions` is focused, press `Enter` to switch to the selected session
+- when `Sessions` is focused, press `d` then `d` to delete the selected session (with confirmation)
+- press `:` in `Normal` to open the floating command panel, then run:
+  - `:help`
+  - `:new`
+  - `:rename [title]` (empty title clears it)
+  - `:delete`
+  - `:model`
+  - `:quit`
+- delete actions require confirmation (`[Y/n]`; `Enter` defaults to `Y`)
 - press `Esc` in `Normal` to cancel an in-flight request
 - `Ctrl+C` quits from any mode
 
 Transcript and composer text are wrapped to pane width so output stays constrained to visible layout bounds.
+TUI sessions/messages are persisted in local SQLite at:
+- `${XDG_DATA_HOME}/rosie/sessions.sqlite3` (when `XDG_DATA_HOME` is set)
+- `~/.local/share/rosie/sessions.sqlite3` (fallback)
 
 ## Configuration
 

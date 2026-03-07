@@ -13,7 +13,9 @@
 - Added transcript scrolling controls in TUI `Normal` mode (`j`/`k`, arrow keys, `PageUp`/`PageDown`, `Ctrl+u`/`Ctrl+d`, `gg`, `G`) with auto-follow to newest output during streaming
 - Added SQLite-backed TUI session persistence (`sessions` and `messages` tables), including startup load/auto-create of active session and transcript hydration on launch
 - Added interactive TUI session list behavior: pane focus toggle (`Tab`), keyboard selection (`j`/`k`, `gg`, `G`), and `Enter` to switch/load persisted sessions
-- Added TUI session management commands in `:` palette: `:rename [title]`, `:archive`, and `:delete`
+- Added TUI session management commands in `:` palette: `:rename [title]` and `:delete`
+- Added session delete confirmation modal (`[Y/n]`, default yes on Enter) used by both `:delete` and sessions-pane `dd`
+- Added TUI unit tests covering SQLite session persistence across restart, session switching, and confirmed session deletion flows (`dd` and `:delete`)
 
 ### Changed
 
@@ -28,11 +30,15 @@
 - Updated TUI message flow to persist user and assistant messages as they arrive, including streamed assistant updates and `:new` creating a new persisted session
 - Updated sessions pane to render real persisted session data (active marker, selection marker, message counts) instead of placeholder text
 - Updated `:help` command output to include the new session management commands
+- Updated README to document TUI session persistence, pane focus/session switching controls, and session-management palette commands
+- Updated TUI normal-mode help text to include `dd` for deleting the selected session
+- Updated man page (`rosie.1`) to reflect current TUI behavior, delete confirmation flow, and session DB file locations
 
 ### Removed
 
 - Removed `.env` loading and runtime environment-variable overrides for host/model selection
 - Removed `dotenvy` dependency
+- Removed archive session command support from the TUI command palette
 
 ## 0.6.1
 
