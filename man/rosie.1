@@ -106,10 +106,6 @@ to apply to the active session, and
 to cancel.
 Use
 .B :theme
-with
-.I catppuccin
-or
-.I rose-pine
 to switch TUI themes.
 Session model selections persist and are restored when switching sessions or restarting.
 Delete actions require confirmation with
@@ -180,14 +176,15 @@ Mode-specific default for
 (optional)
 .TP
 .B theme
-TUI theme name (
-.I catppuccin
-or
-.IR rose-pine )
-or a custom file-based theme name loaded from
+TUI theme name (built-in or file-based) loaded from
 .IR ~/.config/rosie/themes/<name>.toml
 (or
 .IR ${XDG_CONFIG_HOME}/rosie/themes/<name>.toml ).
+Custom theme files use semantic
+.B [ui]
+and
+.B [state]
+color sections.
 .TP
 .B execution_enabled
 If false, command execution is disabled in

@@ -1,4 +1,6 @@
-use crate::theme::{ThemePalette, config_dir_from_env, discover_file_theme_names, resolve_theme};
+use crate::theme::{
+    ThemePalette, config_dir_from_env, default_theme, discover_theme_names, resolve_theme,
+};
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -1867,7 +1869,7 @@ fn help_rows() -> Vec<String> {
         "  i: enter insert mode, Enter: send, Esc: return to normal".to_string(),
         "".to_string(),
         "Commands".to_string(),
-        "  :session  :models  :theme [catppuccin|rose-pine]  :help  :quit".to_string(),
+        "  :session  :models  :theme <name>  :help  :quit".to_string(),
         "  ':' palette shows a picklist; use j/k (or arrows) + Enter".to_string(),
         "  :help or ? opens this panel".to_string(),
         "".to_string(),
@@ -2329,8 +2331,10 @@ fn apply_theme_command(app: &mut AppState, arg: &str) {
                 return;
             }
         };
-        let mut options = vec!["catppuccin".to_string(), "rose-pine".to_string()];
-        options.extend(discover_file_theme_names(&config_dir));
+        let mut options = discover_theme_names(&config_dir);
+        if options.is_empty() {
+            options.push(default_theme().key);
+        }
         options.sort();
         options.dedup();
         app.status_message = format!(
@@ -2408,7 +2412,7 @@ fn tui_config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::ThemeName;
+    use crate::theme::{default_theme, discover_theme_names, resolve_theme};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2434,12 +2438,13 @@ mod tests {
             .iter()
             .position(|session| session.id == active_session_id)
             .unwrap_or(0);
+        let resolved = default_theme();
         AppState::new(
             "http://localhost:11434",
             "test-model",
             "test-model",
-            "catppuccin",
-            ThemeName::Catppuccin.palette(),
+            &resolved.key,
+            resolved.palette,
             store,
             active_session_id,
             messages,
@@ -2589,19 +2594,25 @@ mod tests {
     #[test]
     fn theme_command_switches_theme_in_memory() {
         let db_path = temp_db_path("palette-theme");
+        let config_dir = config_dir_from_env().expect("config dir");
+        let names = discover_theme_names(&config_dir);
+        let first = names.first().map(String::as_str).unwrap_or("theme-a");
+        let second = names.get(1).map(String::as_str).unwrap_or(first);
 
         {
             let store = SessionStore::open(&db_path).expect("open store");
             let loaded = store.load_or_create_active_session().expect("load");
             let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+            let first_resolved = resolve_theme(first, &config_dir).expect("resolve first theme");
+            let second_resolved = resolve_theme(second, &config_dir).expect("resolve second theme");
 
-            app.command_input = ":theme rose-pine".to_string();
+            app.command_input = format!(":theme {first}");
             assert!(!run_palette_command(&mut app));
-            assert_eq!(app.theme_key, "rose-pine");
+            assert_eq!(app.theme_key, first_resolved.key);
 
-            app.command_input = ":theme catppuccin".to_string();
+            app.command_input = format!(":theme {second}");
             assert!(!run_palette_command(&mut app));
-            assert_eq!(app.theme_key, "catppuccin");
+            assert_eq!(app.theme_key, second_resolved.key);
         }
 
         let _ = fs::remove_file(&db_path);

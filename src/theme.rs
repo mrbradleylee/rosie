@@ -4,47 +4,15 @@ use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_THEME: ThemeName = ThemeName::RosePine;
+pub const DEFAULT_THEME_KEY: &str = "rose-pine";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ThemeName {
-    Catppuccin,
-    RosePine,
-}
-
-impl ThemeName {
-    pub fn from_config(value: Option<&str>) -> Option<Self> {
-        let raw = value?.trim().to_ascii_lowercase();
-        match raw.as_str() {
-            "catppuccin" | "catppuccin-mocha" | "mocha" => Some(Self::Catppuccin),
-            "rose-pine" | "rosepine" | "rose_pine" => Some(Self::RosePine),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Catppuccin => "catppuccin",
-            Self::RosePine => "rose-pine",
-        }
-    }
-
-    pub fn palette(self) -> ThemePalette {
-        match self {
-            Self::Catppuccin => ThemePalette {
-                base: Color::Rgb(30, 30, 46),
-                surface: Color::Rgb(24, 24, 37),
-                surface_alt: Color::Rgb(49, 50, 68),
-                text: Color::Rgb(205, 214, 244),
-                muted: Color::Rgb(166, 173, 200),
-                accent: Color::Rgb(137, 180, 250),
-                success: Color::Rgb(166, 227, 161),
-                warn: Color::Rgb(249, 226, 175),
-                error: Color::Rgb(243, 139, 168),
-                border: Color::Rgb(69, 71, 90),
-                border_active: Color::Rgb(180, 190, 254),
-            },
-            Self::RosePine => ThemePalette {
+pub fn default_theme() -> ResolvedTheme {
+    let packaged_dir = packaged_theme_dir();
+    match resolve_theme_from_dir(DEFAULT_THEME_KEY, &packaged_dir) {
+        Ok(Some(theme)) => theme,
+        _ => ResolvedTheme {
+            key: DEFAULT_THEME_KEY.to_string(),
+            palette: ThemePalette {
                 base: Color::Rgb(25, 23, 36),
                 surface: Color::Rgb(31, 29, 46),
                 surface_alt: Color::Rgb(38, 35, 58),
@@ -57,7 +25,7 @@ impl ThemeName {
                 border: Color::Rgb(64, 61, 82),
                 border_active: Color::Rgb(82, 79, 103),
             },
-        }
+        },
     }
 }
 
@@ -85,7 +53,48 @@ pub struct ResolvedTheme {
 struct ThemeFile {
     #[allow(dead_code)]
     name: Option<String>,
-    colors: ThemeFileColors,
+    ui: Option<ThemeFileUi>,
+    state: Option<ThemeFileState>,
+    #[allow(dead_code)]
+    syntax: Option<ThemeFileSyntax>,
+    #[allow(dead_code)]
+    highlight: Option<ThemeFileHighlight>,
+    colors: Option<ThemeFileColors>,
+}
+
+#[derive(Deserialize)]
+struct ThemeFileUi {
+    bg: String,
+    panel: String,
+    panel_alt: String,
+    text: String,
+    text_muted: String,
+    border: String,
+    border_active: String,
+}
+
+#[derive(Deserialize)]
+struct ThemeFileState {
+    accent: String,
+    success: String,
+    warning: String,
+    error: String,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct ThemeFileSyntax {
+    user: String,
+    assistant: String,
+    system: String,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct ThemeFileHighlight {
+    low: String,
+    mid: String,
+    high: String,
 }
 
 #[derive(Deserialize)]
@@ -104,61 +113,63 @@ struct ThemeFileColors {
 }
 
 pub fn resolve_theme(theme_name: &str, config_dir: &Path) -> Result<ResolvedTheme> {
-    if let Some(builtin) = ThemeName::from_config(Some(theme_name)) {
-        return Ok(ResolvedTheme {
-            key: builtin.as_str().to_string(),
-            palette: builtin.palette(),
+    let file_name = normalize_theme_file_stem(theme_name)?;
+    if let Some(theme) = resolve_theme_from_dir(&file_name, &config_dir.join("themes"))? {
+        return Ok(theme);
+    }
+    if let Some(theme) = resolve_theme_from_dir(&file_name, &packaged_theme_dir())? {
+        return Ok(theme);
+    }
+    Err(anyhow!(
+        "Theme '{file_name}' not found in '{}' or '{}'",
+        config_dir.join("themes").display(),
+        packaged_theme_dir().display()
+    ))
+}
+
+fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
+    if let (Some(ui), Some(state)) = (&file.ui, &file.state) {
+        return Ok(ThemePalette {
+            base: parse_hex_color(&ui.bg)?,
+            surface: parse_hex_color(&ui.panel)?,
+            surface_alt: parse_hex_color(&ui.panel_alt)?,
+            text: parse_hex_color(&ui.text)?,
+            muted: parse_hex_color(&ui.text_muted)?,
+            accent: parse_hex_color(&state.accent)?,
+            success: parse_hex_color(&state.success)?,
+            warn: parse_hex_color(&state.warning)?,
+            error: parse_hex_color(&state.error)?,
+            border: parse_hex_color(&ui.border)?,
+            border_active: parse_hex_color(&ui.border_active)?,
         });
     }
 
-    let file_name = normalize_theme_file_stem(theme_name)?;
-    let path = config_dir.join("themes").join(format!("{file_name}.toml"));
-    let contents = fs::read_to_string(&path)
-        .map_err(|err| anyhow!("Unable to read theme file '{}': {err}", path.display()))?;
-    let file: ThemeFile = toml::from_str(&contents)
-        .map_err(|err| anyhow!("Invalid theme TOML '{}': {err}", path.display()))?;
+    if let Some(colors) = &file.colors {
+        return Ok(ThemePalette {
+            base: parse_hex_color(&colors.base)?,
+            surface: parse_hex_color(&colors.surface)?,
+            surface_alt: parse_hex_color(&colors.surface_alt)?,
+            text: parse_hex_color(&colors.text)?,
+            muted: parse_hex_color(&colors.muted)?,
+            accent: parse_hex_color(&colors.accent)?,
+            success: parse_hex_color(&colors.success)?,
+            warn: parse_hex_color(&colors.warn)?,
+            error: parse_hex_color(&colors.error)?,
+            border: parse_hex_color(&colors.border)?,
+            border_active: parse_hex_color(&colors.border_active)?,
+        });
+    }
 
-    let palette = ThemePalette {
-        base: parse_hex_color(&file.colors.base)?,
-        surface: parse_hex_color(&file.colors.surface)?,
-        surface_alt: parse_hex_color(&file.colors.surface_alt)?,
-        text: parse_hex_color(&file.colors.text)?,
-        muted: parse_hex_color(&file.colors.muted)?,
-        accent: parse_hex_color(&file.colors.accent)?,
-        success: parse_hex_color(&file.colors.success)?,
-        warn: parse_hex_color(&file.colors.warn)?,
-        error: parse_hex_color(&file.colors.error)?,
-        border: parse_hex_color(&file.colors.border)?,
-        border_active: parse_hex_color(&file.colors.border_active)?,
-    };
-
-    Ok(ResolvedTheme {
-        key: file_name,
-        palette,
-    })
+    Err(anyhow!(
+        "Theme file '{}' must define either [ui] + [state] sections or legacy [colors] section",
+        path.display()
+    ))
 }
 
-pub fn discover_file_theme_names(config_dir: &Path) -> Vec<String> {
+pub fn discover_theme_names(config_dir: &Path) -> Vec<String> {
     let mut names = Vec::new();
-    let themes_dir = config_dir.join("themes");
-    let Ok(entries) = fs::read_dir(themes_dir) else {
-        return names;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
-            continue;
-        };
-        if ext != "toml" {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|v| v.to_str()) else {
-            continue;
-        };
-        if normalize_theme_file_stem(stem).is_ok() {
-            names.push(stem.to_string());
-        }
-    }
+    names.extend(discover_file_theme_names_in_dir(&packaged_theme_dir()));
+    names.extend(discover_file_theme_names_in_dir(&config_dir.join("themes")));
     names.sort();
     names.dedup();
     names
@@ -187,6 +198,54 @@ fn normalize_theme_file_stem(value: &str) -> Result<String> {
         ));
     }
     Ok(stem)
+}
+
+fn packaged_theme_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("themes")
+}
+
+fn discover_file_theme_names_in_dir(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        if ext != "toml" {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        if normalize_theme_file_stem(stem).is_ok() {
+            names.push(stem.to_string());
+        }
+    }
+    names
+}
+
+fn resolve_theme_from_dir(theme_name: &str, dir: &Path) -> Result<Option<ResolvedTheme>> {
+    let path = dir.join(format!("{theme_name}.toml"));
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(anyhow!(
+                "Unable to read theme file '{}': {err}",
+                path.display()
+            ));
+        }
+    };
+    let file: ThemeFile = toml::from_str(&contents)
+        .map_err(|err| anyhow!("Invalid theme TOML '{}': {err}", path.display()))?;
+    let palette = parse_theme_palette(&file, &path)?;
+    Ok(Some(ResolvedTheme {
+        key: theme_name.to_string(),
+        palette,
+    }))
 }
 
 fn parse_hex_color(value: &str) -> Result<Color> {

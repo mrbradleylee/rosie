@@ -1,0 +1,26 @@
+name = "Rose Pine Dawn"
+
+[ui]
+bg = "#faf4ed"
+panel = "#fffaf3"
+panel_alt = "#f2e9e1"
+text = "#575279"
+text_muted = "#797593"
+border = "#dfdad9"
+border_active = "#cecacd"
+
+[state]
+accent = "#907aa9"
+success = "#56949f"
+warning = "#ea9d34"
+error = "#b4637a"
+
+[syntax]
+user = "#907aa9"
+assistant = "#575279"
+system = "#797593"
+
+[highlight]
+low = "#f4ede8"
+mid = "#dfdad9"
+high = "#cecacd"

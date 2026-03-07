@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use theme::{DEFAULT_THEME, config_dir_from_env, resolve_theme};
+use theme::{config_dir_from_env, default_theme, resolve_theme};
 use tokio::io::{self as tokio_io, AsyncReadExt};
 
 const MAN_PAGE: &str = include_str!("../man/rosie.1");
@@ -147,10 +147,11 @@ async fn launch_tui(runtime_model: Option<&str>) -> Result<()> {
     fs::create_dir_all(&data_dir)?;
     let db_path = data_dir.join("sessions.sqlite3");
     let config_dir = config_dir_from_env()?;
+    let default_theme_key = default_theme().key;
     let theme_key = config
         .theme
         .as_deref()
-        .unwrap_or(DEFAULT_THEME.as_str())
+        .unwrap_or(default_theme_key.as_str())
         .to_string();
     let resolved_theme = resolve_theme(&theme_key, &config_dir)?;
 
@@ -1009,7 +1010,7 @@ async fn configure() -> Result<()> {
     let theme = existing
         .theme
         .clone()
-        .unwrap_or_else(|| DEFAULT_THEME.as_str().to_string());
+        .unwrap_or_else(|| default_theme().key);
     let execution_enabled = prompt_bool_config_value(
         "Enable command execution for --cmd",
         existing.execution_enabled.unwrap_or(true),

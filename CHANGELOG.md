@@ -13,7 +13,9 @@
 - Changed the default theme to `rose-pine`
 - Added `:theme` palette command to view/switch themes at runtime and persist selection to config
 - Updated `--configure` to stop prompting for theme selection
-- Added file-backed theme loading from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`) using a documented `[colors]` hex schema
+- Added file-backed theme loading from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`) using a documented color schema
+- Updated file theme schema to prefer semantic `[ui]` + `[state]` sections, with legacy `[colors]` still supported for compatibility
+- Switched default theme sourcing to packaged repo theme files (`themes/*.toml`) and added Rose Pine variants (`rose-pine`, `rose-pine-moon`, `rose-pine-dawn`)
 
 ## 0.7.0
 

@@ -11,7 +11,7 @@ Running `rosie` with no mode flag launches the full-screen TUI chat interface (s
 - `--ask` quick chat mode for one-shot responses
 - `--cmd` command-generation mode with existing `e/r/q` interactive flow
 - Default no-flag TUI chat mode with persisted local sessions
-- Built-in TUI themes (`catppuccin` and `rose-pine`)
+- Built-in TUI themes with runtime switching (`:theme`)
 - `--model <MODEL>` runtime model override for both `--ask` and `--cmd`
 - Config-driven Ollama host/model defaults in `~/.config/rosie/config.toml`
 - Interactive `--configure` flow with model discovery from Ollama
@@ -90,7 +90,7 @@ In the default TUI:
   - `:help`
   - `:session` (open session manager modal)
   - `:models` (open model picker from Ollama `/api/tags` for the active session)
-  - `:theme <catppuccin|rose-pine>` (set TUI theme)
+  - `:theme <name>` (set TUI theme)
   - `:quit`
 - in the `:` command panel, use `j`/`k` (or arrows) to select from the command picklist and `Enter` to run
 - in session manager, use `j`/`k` to select and `Enter` switch, `n` new, `r` rename, `d` delete (with confirmation), `Esc` close
@@ -127,7 +127,8 @@ That command creates/updates config and prompts for:
 - `execution_enabled` (controls whether execute is allowed in `--cmd`)
 
 Theme is controlled in TUI with `:theme` and persisted into config as `theme`.
-`theme` accepts either a built-in (`catppuccin`, `rose-pine`) or a file theme name loaded from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`).
+`theme` accepts a packaged theme name from the repo `themes/` directory (discoverable with `:theme`) or a user file theme name loaded from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`).
+Packaged defaults include Rose Pine variants (`rose-pine`, `rose-pine-moon`, `rose-pine-dawn`).
 
 Example config:
 
@@ -136,28 +137,42 @@ ollama_host = "http://localhost:11434"
 default_model = "llama3.2"
 ask_model = "llama3.2"
 cmd_model = "qwen2.5-coder"
-theme = "rose-pine"
+theme = "<built-in-or-file-theme-name>"
 execution_enabled = true
 ```
 
-Theme file schema:
+Theme file schema (preferred):
 
 ```toml
 name = "my-theme"
 
-[colors]
-base = "#191724"
-surface = "#1f1d2e"
-surface_alt = "#26233a"
+[ui]
+bg = "#191724"
+panel = "#1f1d2e"
+panel_alt = "#26233a"
 text = "#e0def4"
-muted = "#908caa"
-accent = "#c4a7e7"
-success = "#9ccfd8"
-warn = "#f6c177"
-error = "#eb6f92"
+text_muted = "#908caa"
 border = "#403d52"
 border_active = "#524f67"
+
+[state]
+accent = "#c4a7e7"
+success = "#9ccfd8"
+warning = "#f6c177"
+error = "#eb6f92"
+
+[syntax]
+user = "#c4a7e7"
+assistant = "#e0def4"
+system = "#908caa"
+
+[highlight]
+low = "#21202e"
+mid = "#403d52"
+high = "#524f67"
 ```
+
+Legacy `[colors]` files are still supported for backward compatibility.
 
 Model resolution order:
 1. `--model`
