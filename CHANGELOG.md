@@ -21,6 +21,9 @@
 - Increased TUI visual contrast by applying `[highlight]`/`[syntax]` theme colors to panel separation and transcript role styling
 - Updated pane titles to use explicit semantic title/value colors (e.g., transcript session title and composer model) for improved contrast on dark and light themes
 - Added `ui.title_label`, `ui.title_value`, and `ui.title_meta` theme tokens so pane/title colors are sourced from theme files rather than fixed mappings
+- Updated bundled Rose Pine variant theme files to increase title/value contrast via theme tokens
+- Updated `--install` to copy bundled `themes/*.toml` into `${XDG_CONFIG_HOME:-~/.config}/rosie/themes`
+- Added `state.info` and `ui.title_value_alt` theme tokens for richer neutral-semantic theming (e.g., streaming/info states and secondary title values like model)
 
 ## 0.7.0
 

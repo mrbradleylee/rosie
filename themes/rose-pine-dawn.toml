@@ -8,13 +8,15 @@ text = "#575279"
 text_muted = "#797593"
 border = "#dfdad9"
 border_active = "#cecacd"
-title_label = "#575279"
-title_value = "#907aa9"
+title_label = "#d7827e"
+title_value = "#286983"
+title_value_alt = "#ea9d34"
 title_meta = "#797593"
 
 [state]
 accent = "#907aa9"
 success = "#56949f"
+info = "#286983"
 warning = "#ea9d34"
 error = "#b4637a"
 

@@ -38,6 +38,7 @@ cargo build --release
 ```
 
 By default Rosie installs itself into `~/.local/bin/rosie` (or `$XDG_BIN_HOME/rosie` if set), and installs the man page to `~/.local/share/man/man1/rosie.1` (or `$XDG_DATA_HOME/man/man1/rosie.1`).
+`rosie -install` also syncs bundled theme files into `${XDG_CONFIG_HOME:-~/.config}/rosie/themes`.
 
 ## Usage
 
@@ -157,11 +158,13 @@ border = "#403d52"
 border_active = "#524f67"
 title_label = "#e0def4"
 title_value = "#c4a7e7"
+title_value_alt = "#ebbcba"
 title_meta = "#908caa"
 
 [state]
 accent = "#c4a7e7"
 success = "#9ccfd8"
+info = "#31748f"
 warning = "#f6c177"
 error = "#eb6f92"
 

@@ -523,7 +523,7 @@ fn run_loop(
                 transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
                 transcript_title_spans.push(Span::styled(
                     "Streaming...",
-                    Style::default().fg(theme.success),
+                    Style::default().fg(theme.info),
                 ));
             }
             let transcript_base = Paragraph::new(transcript_lines)
@@ -565,7 +565,7 @@ fn run_loop(
                             Span::styled(" | ", Style::default().fg(theme.title_meta)),
                             Span::styled("Model:", Style::default().fg(theme.title_meta)),
                             Span::styled(" ", Style::default().fg(theme.title_meta)),
-                            Span::styled(app.model.clone(), Style::default().fg(theme.title_value)),
+                            Span::styled(app.model.clone(), Style::default().fg(theme.title_value_alt)),
                         ]))
                         .style(Style::default().bg(theme.surface_alt).fg(theme.text))
                         .border_style(Style::default().fg(if composer_active {
@@ -2159,7 +2159,9 @@ fn status_color(message: &str, theme: ThemePalette) -> Color {
     let lower = message.to_ascii_lowercase();
     if lower.contains("error") || lower.contains("failed") {
         theme.error
-    } else if lower.contains("streaming") || lower.contains("loaded") || lower.contains("saved") {
+    } else if lower.contains("streaming") || lower.contains("loading") {
+        theme.info
+    } else if lower.contains("loaded") || lower.contains("saved") {
         theme.success
     } else if lower.contains("cancel") || lower.contains("delete") || lower.contains("warning") {
         theme.warn

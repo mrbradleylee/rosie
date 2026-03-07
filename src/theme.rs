@@ -20,6 +20,7 @@ pub fn default_theme() -> ResolvedTheme {
                 muted: Color::Rgb(144, 140, 170),
                 accent: Color::Rgb(196, 167, 231),
                 success: Color::Rgb(156, 207, 216),
+                info: Color::Rgb(49, 116, 143),
                 warn: Color::Rgb(246, 193, 119),
                 error: Color::Rgb(235, 111, 146),
                 border: Color::Rgb(64, 61, 82),
@@ -32,6 +33,7 @@ pub fn default_theme() -> ResolvedTheme {
                 highlight_high: Color::Rgb(82, 79, 103),
                 title_label: Color::Rgb(224, 222, 244),
                 title_value: Color::Rgb(196, 167, 231),
+                title_value_alt: Color::Rgb(235, 188, 186),
                 title_meta: Color::Rgb(144, 140, 170),
             },
         },
@@ -47,6 +49,7 @@ pub struct ThemePalette {
     pub muted: Color,
     pub accent: Color,
     pub success: Color,
+    pub info: Color,
     pub warn: Color,
     pub error: Color,
     pub border: Color,
@@ -59,6 +62,7 @@ pub struct ThemePalette {
     pub highlight_high: Color,
     pub title_label: Color,
     pub title_value: Color,
+    pub title_value_alt: Color,
     pub title_meta: Color,
 }
 
@@ -91,6 +95,7 @@ struct ThemeFileUi {
     border_active: String,
     title_label: Option<String>,
     title_value: Option<String>,
+    title_value_alt: Option<String>,
     title_meta: Option<String>,
 }
 
@@ -98,6 +103,7 @@ struct ThemeFileUi {
 struct ThemeFileState {
     accent: String,
     success: String,
+    info: Option<String>,
     warning: String,
     error: String,
 }
@@ -157,6 +163,12 @@ fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
         let muted = parse_hex_color(&ui.text_muted)?;
         let accent = parse_hex_color(&state.accent)?;
         let success = parse_hex_color(&state.success)?;
+        let info = state
+            .info
+            .as_deref()
+            .map(parse_hex_color)
+            .transpose()?
+            .unwrap_or(accent);
         let warn = parse_hex_color(&state.warning)?;
         let error = parse_hex_color(&state.error)?;
         let border = parse_hex_color(&ui.border)?;
@@ -209,6 +221,12 @@ fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
             .map(parse_hex_color)
             .transpose()?
             .unwrap_or(accent);
+        let title_value_alt = ui
+            .title_value_alt
+            .as_deref()
+            .map(parse_hex_color)
+            .transpose()?
+            .unwrap_or(title_value);
         let title_meta = ui
             .title_meta
             .as_deref()
@@ -223,6 +241,7 @@ fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
             muted,
             accent,
             success,
+            info,
             warn,
             error,
             border,
@@ -235,6 +254,7 @@ fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
             highlight_high,
             title_label,
             title_value,
+            title_value_alt,
             title_meta,
         });
     }
@@ -247,6 +267,7 @@ fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
         let muted = parse_hex_color(&colors.muted)?;
         let accent = parse_hex_color(&colors.accent)?;
         let success = parse_hex_color(&colors.success)?;
+        let info = accent;
         let warn = parse_hex_color(&colors.warn)?;
         let error = parse_hex_color(&colors.error)?;
         let border = parse_hex_color(&colors.border)?;
@@ -259,6 +280,7 @@ fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
             muted,
             accent,
             success,
+            info,
             warn,
             error,
             border,
@@ -271,6 +293,7 @@ fn parse_theme_palette(file: &ThemeFile, path: &Path) -> Result<ThemePalette> {
             highlight_high: border_active,
             title_label: text,
             title_value: accent,
+            title_value_alt: accent,
             title_meta: muted,
         });
     }

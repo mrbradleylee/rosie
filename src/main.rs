@@ -902,6 +902,8 @@ fn install() -> Result<()> {
 
     let man_page_path = install_man_page()?;
     println!("Installed man page to {}", man_page_path.display());
+    let themes_dir = install_packaged_themes()?;
+    println!("Installed bundled themes to {}", themes_dir.display());
 
     if !path_contains(&bin_dir) {
         println!(
@@ -1191,6 +1193,13 @@ fn config_path() -> Result<PathBuf> {
     Ok(base.join("rosie").join("config.toml"))
 }
 
+fn config_dir() -> Result<PathBuf> {
+    config_path()?
+        .parent()
+        .map(|path| path.to_path_buf())
+        .ok_or_else(|| anyhow!("Unable to determine config directory"))
+}
+
 fn app_data_dir() -> Result<PathBuf> {
     let base = env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -1220,6 +1229,38 @@ fn install_man_page() -> Result<PathBuf> {
     let man_page_path = man_dir.join("rosie.1");
     fs::write(&man_page_path, MAN_PAGE)?;
     Ok(man_page_path)
+}
+
+fn install_packaged_themes() -> Result<PathBuf> {
+    let source_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("themes");
+    let destination_dir = config_dir()?.join("themes");
+    fs::create_dir_all(&destination_dir)?;
+
+    let entries = fs::read_dir(&source_dir).map_err(|err| {
+        anyhow!(
+            "Failed to read bundled themes '{}': {err}",
+            source_dir.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| anyhow!("Theme file missing name: {}", path.display()))?;
+        fs::copy(&path, destination_dir.join(file_name)).map_err(|err| {
+            anyhow!(
+                "Failed to install bundled theme '{}' to '{}': {err}",
+                path.display(),
+                destination_dir.display()
+            )
+        })?;
+    }
+
+    Ok(destination_dir)
 }
 
 fn path_contains(dir: &std::path::Path) -> bool {
