@@ -893,7 +893,7 @@ async fn configure() -> Result<()> {
         true,
     )?;
 
-    let selected_from_discovery = match discover_ollama_models(&ollama_host).await {
+    let discovered_models = match discover_ollama_models(&ollama_host).await {
         Ok(models) => {
             println!();
             println!("Available models:");
@@ -902,26 +902,7 @@ async fn configure() -> Result<()> {
                 println!("  {}. {}", i + 1, model_id);
             }
 
-            if models.is_empty() {
-                None
-            } else {
-                println!();
-                let input = prompt_config_value(
-                    "Select a default model by number or enter full model ID",
-                    None::<&str>,
-                    true,
-                )?;
-
-                if input.is_empty() {
-                    None
-                } else if let Ok(num) = input.parse::<usize>() {
-                    models.get(num.saturating_sub(1)).cloned()
-                } else if models.iter().any(|model| model == &input) {
-                    Some(input)
-                } else {
-                    Some(input)
-                }
-            }
+            if models.is_empty() { None } else { Some(models) }
         }
         Err(err) => {
             let message = format!("Model discovery failed: {}", err);
@@ -933,24 +914,48 @@ async fn configure() -> Result<()> {
         }
     };
 
-    let default_model = prompt_config_value(
-        "Default model",
-        existing
-            .effective_default_model()
-            .as_deref()
-            .or(selected_from_discovery.as_deref()),
-        true,
-    )?;
-    let ask_model = prompt_config_value(
-        "Ask model (optional, falls back to default model)",
-        existing.ask_model.as_deref(),
-        true,
-    )?;
-    let cmd_model = prompt_config_value(
-        "Cmd model (optional, falls back to default model)",
-        existing.cmd_model.as_deref(),
-        true,
-    )?;
+    let default_model = match discovered_models.as_deref() {
+        Some(models) if !models.is_empty() => prompt_model_with_confirmation(
+            "Default model",
+            existing.effective_default_model().as_deref(),
+            true,
+            models,
+            None,
+        )?,
+        _ => prompt_config_value(
+            "Default model",
+            existing.effective_default_model().as_deref(),
+            true,
+        )?,
+    };
+    let ask_model = match discovered_models.as_deref() {
+        Some(models) if !models.is_empty() => prompt_model_with_confirmation(
+            "Ask model (optional, falls back to default model)",
+            existing.ask_model.as_deref(),
+            true,
+            models,
+            Some("(fallback to default model)"),
+        )?,
+        _ => prompt_config_value(
+            "Ask model (optional, falls back to default model)",
+            existing.ask_model.as_deref(),
+            true,
+        )?,
+    };
+    let cmd_model = match discovered_models.as_deref() {
+        Some(models) if !models.is_empty() => prompt_model_with_confirmation(
+            "Cmd model (optional, falls back to default model)",
+            existing.cmd_model.as_deref(),
+            true,
+            models,
+            Some("(fallback to default model)"),
+        )?,
+        _ => prompt_config_value(
+            "Cmd model (optional, falls back to default model)",
+            existing.cmd_model.as_deref(),
+            true,
+        )?,
+    };
     let execution_enabled = prompt_bool_config_value(
         "Enable command execution for --cmd",
         existing.execution_enabled.unwrap_or(true),
@@ -1000,6 +1005,71 @@ fn prompt_config_value(label: &str, current: Option<&str>, allow_empty: bool) ->
     }
 
     Ok(input)
+}
+
+fn prompt_model_config_value(
+    label: &str,
+    current: Option<&str>,
+    allow_empty: bool,
+    models: &[String],
+) -> Result<String> {
+    loop {
+        let input = prompt_config_value(label, current, allow_empty)?;
+        if let Ok(num) = input.parse::<usize>() {
+            if (1..=models.len()).contains(&num) {
+                return Ok(models[num - 1].clone());
+            }
+
+            println!(
+                "Invalid selection. Enter a number from 1 to {}.",
+                models.len()
+            );
+            continue;
+        }
+
+        return Ok(input);
+    }
+}
+
+fn prompt_model_with_confirmation(
+    label: &str,
+    current: Option<&str>,
+    allow_empty: bool,
+    models: &[String],
+    empty_selection_label: Option<&str>,
+) -> Result<String> {
+    let mut suggested = current.map(str::to_owned);
+
+    loop {
+        let selection = prompt_model_config_value(label, suggested.as_deref(), allow_empty, models)?;
+
+        if selection.is_empty() {
+            println!(
+                "Selected {}: {}",
+                label,
+                empty_selection_label.unwrap_or("(none)")
+            );
+        } else {
+            println!("Selected {}: {}", label, selection);
+        }
+
+        if prompt_confirm_or_reselect()? {
+            return Ok(selection);
+        }
+
+        suggested = normalize_config_value(selection);
+    }
+}
+
+fn prompt_confirm_or_reselect() -> Result<bool> {
+    loop {
+        let choice = prompt_config_value("[c]onfirm or [r]eselect", Some("c"), true)?;
+        match choice.trim().to_ascii_lowercase().as_str() {
+            "" | "c" | "confirm" => return Ok(true),
+            "r" | "reselect" | "re-select" => return Ok(false),
+            _ => println!("Please enter 'c' to confirm or 'r' to reselect."),
+        }
+    }
 }
 
 fn normalize_config_value(value: String) -> Option<String> {
