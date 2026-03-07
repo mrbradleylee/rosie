@@ -35,16 +35,20 @@ async fn main() -> Result<()> {
         #[arg(long)]
         install: bool,
 
-        /// Force chat mode (general Q&A instead of command generation)
-        #[arg(short = 'c', long = "chat")]
-        chat_mode: bool,
+        /// Quick one-shot chat (non-TUI)
+        #[arg(short = 'a', long = "ask", conflicts_with = "cmd_mode")]
+        ask_mode: bool,
+
+        /// Command-generation mode (existing non-TUI flow)
+        #[arg(short = 'c', long = "cmd", conflicts_with = "ask_mode")]
+        cmd_mode: bool,
 
         /// Override the default model for this request
         #[arg(long, value_name = "MODEL")]
         model: Option<String>,
 
         /// Prompt to send to the LLM
-        #[arg(trailing_var_arg = true)]
+        #[arg(value_name = "PROMPT")]
         prompt: Vec<String>,
 
         /// Display version information (short form: -v)
@@ -74,41 +78,47 @@ async fn main() -> Result<()> {
     // Capture runtime model override from CLI flag
     let runtime_model = args.model.clone();
 
+    if !args.ask_mode && !args.cmd_mode {
+        launch_tui_placeholder()?;
+        return Ok(());
+    }
+
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     let mut prompt = read_prompt(args.prompt, interactive).await?;
 
-    if args.chat_mode {
-        // Chat mode: general Q&A - non-interactive by default
+    if args.ask_mode {
         let chat_response = generate_chat_with_spinner(&prompt, runtime_model.as_deref()).await?;
-
-        // Print simple response without formatting (not terminal command style)
         println!("{}", chat_response);
-    } else {
-        // Command mode: original behavior
-        loop {
-            let generated =
-                generate_command_with_spinner(&prompt, runtime_model.as_deref()).await?;
-
-            if !interactive {
-                print_generated_command(&generated);
-                return Ok(());
-            }
-
-            print_generated_command(&generated);
-
-            match prompt_next_action()? {
-                NextAction::Execute => {
-                    execute_command(&generated.command)?;
-                    return Ok(());
-                }
-                NextAction::ReenterPrompt => {
-                    prompt = prompt_for_line("Prompt")?;
-                }
-                NextAction::Quit => return Ok(()),
-            }
-        }
+        return Ok(());
     }
 
+    // --cmd mode: preserve existing command generation flow
+    loop {
+        let generated = generate_command_with_spinner(&prompt, runtime_model.as_deref()).await?;
+
+        if !interactive {
+            print_generated_command(&generated);
+            return Ok(());
+        }
+
+        print_generated_command(&generated);
+
+        match prompt_next_action()? {
+            NextAction::Execute => {
+                execute_command(&generated.command)?;
+                return Ok(());
+            }
+            NextAction::ReenterPrompt => {
+                prompt = prompt_for_line("Prompt")?;
+            }
+            NextAction::Quit => return Ok(()),
+        }
+    }
+}
+
+fn launch_tui_placeholder() -> Result<()> {
+    println!("Rosie TUI is planned but not implemented yet.");
+    println!("Use `rosie --ask \"...\"` for quick chat or `rosie --cmd \"...\"` for command mode.");
     Ok(())
 }
 
