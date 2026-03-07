@@ -29,6 +29,7 @@
 - Updated session startup behavior to restore the persisted last active session when sessions exist, and only create a new session when the local store is empty
 - Added a startup Landing mode with a dedicated title block, chat entry box, and quick command hints (`:session`, `:models`, `:theme`, `Ctrl+P`)
 - Updated session initialization to be lazy from Landing: Rosie now opens without creating a session until chat/model actions require one
+- Removed unused `sessions.is_archived` from the local TUI schema for new databases
 
 ## 0.7.0
 

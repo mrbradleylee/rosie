@@ -187,7 +187,7 @@ impl SessionStore {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 title TEXT,
-                is_archived INTEGER NOT NULL DEFAULT 0
+                model TEXT
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -210,7 +210,6 @@ impl SessionStore {
             );
             ",
         )?;
-        ensure_sessions_model_column(&conn)?;
 
         Ok(Self { conn })
     }
@@ -283,7 +282,7 @@ impl SessionStore {
     fn create_session(&self) -> Result<i64> {
         let now = unix_timestamp();
         self.conn.execute(
-            "INSERT INTO sessions (created_at, updated_at, title, is_archived) VALUES (?1, ?2, NULL, 0)",
+            "INSERT INTO sessions (created_at, updated_at, title, model) VALUES (?1, ?2, NULL, NULL)",
             params![now, now],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -414,19 +413,6 @@ impl SessionStore {
         )?;
         Ok(changed > 0)
     }
-}
-
-fn ensure_sessions_model_column(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
-    let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    let has_model = cols
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .iter()
-        .any(|name| name == "model");
-    if !has_model {
-        conn.execute("ALTER TABLE sessions ADD COLUMN model TEXT", [])?;
-    }
-    Ok(())
 }
 
 fn unix_timestamp() -> i64 {
