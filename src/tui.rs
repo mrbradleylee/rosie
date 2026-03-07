@@ -9,7 +9,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::time::Duration;
@@ -36,6 +36,11 @@ struct AppState {
     composer_input: String,
     command_input: String,
     messages: Vec<ChatMessage>,
+    transcript_scroll: u16,
+    transcript_follow: bool,
+    transcript_view_width: usize,
+    transcript_view_height: usize,
+    pending_g: bool,
     in_flight: Option<InFlightRequest>,
     status_message: String,
 }
@@ -49,6 +54,11 @@ impl AppState {
             composer_input: String::new(),
             command_input: String::new(),
             messages: Vec::new(),
+            transcript_scroll: 0,
+            transcript_follow: true,
+            transcript_view_width: 1,
+            transcript_view_height: 1,
+            pending_g: false,
             in_flight: None,
             status_message: "Normal mode. Press i to enter Insert mode.".to_string(),
         }
@@ -123,40 +133,46 @@ fn run_loop(
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
                 .split(root[1]);
+            let transcript_inner = body[1].inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            app.transcript_view_width = transcript_inner.width.max(1) as usize;
+            app.transcript_view_height = transcript_inner.height.max(1) as usize;
 
             let sessions = Paragraph::new("Session list (coming soon)")
                 .block(Block::default().borders(Borders::ALL).title("Sessions"));
             frame.render_widget(sessions, body[0]);
 
-            let transcript_lines: Vec<Line<'_>> = if app.messages.is_empty() {
-                vec![Line::from("No messages yet. Press i, type, then Enter.")]
-            } else {
-                app.messages
-                    .iter()
-                    .map(|entry| {
-                        let label = match entry.role.as_str() {
-                            "user" => "You",
-                            "assistant" => "Assistant",
-                            _ => "System",
-                        };
-                        Line::from(format!("{label}: {}", entry.content))
-                    })
-                    .collect()
-            };
+            let transcript_rows = transcript_rows(&app.messages);
+            let total_lines = total_wrapped_lines(&transcript_rows, app.transcript_view_width);
+            let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
+            if app.transcript_follow {
+                app.transcript_scroll = max_scroll;
+            } else if app.transcript_scroll > max_scroll {
+                app.transcript_scroll = max_scroll;
+            }
+            let transcript_lines: Vec<Line<'_>> = transcript_rows
+                .iter()
+                .map(|row| Line::from(row.as_str()))
+                .collect();
             let transcript = Paragraph::new(transcript_lines)
-                .block(Block::default().borders(Borders::ALL).title("Transcript"));
+                .block(Block::default().borders(Borders::ALL).title("Transcript"))
+                .wrap(Wrap { trim: false })
+                .scroll((app.transcript_scroll, 0));
             frame.render_widget(transcript, body[1]);
 
             let composer = Paragraph::new(app.composer_input.as_str())
-                .block(Block::default().borders(Borders::ALL).title("Composer"));
+                .block(Block::default().borders(Borders::ALL).title("Composer"))
+                .wrap(Wrap { trim: false });
             frame.render_widget(composer, root[2]);
 
             let footer_help = match app.mode {
                 InputMode::Normal => {
                     if app.is_busy() {
-                        "i: insert (disabled) | : command palette | Esc: cancel stream | Ctrl+C: quit"
+                        "j/k: scroll | i: insert (disabled) | : commands | Esc: cancel stream | Ctrl+C: quit"
                     } else {
-                        "i: insert | : command palette | Ctrl+C: quit"
+                        "j/k: scroll | i: insert | : commands | Ctrl+C: quit"
                     }
                 }
                 InputMode::Insert => "Enter: send | Backspace: edit | Esc: normal",
@@ -187,7 +203,49 @@ fn run_loop(
 
             match app.mode {
                 InputMode::Normal => match key.code {
+                    KeyCode::PageDown => {
+                        let page = app.transcript_view_height as u16;
+                        scroll_transcript_down(&mut app, page);
+                        app.pending_g = false;
+                    }
+                    KeyCode::PageUp => {
+                        let page = app.transcript_view_height as u16;
+                        scroll_transcript_up(&mut app, page);
+                        app.pending_g = false;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        scroll_transcript_down(&mut app, 1);
+                        app.pending_g = false;
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        scroll_transcript_up(&mut app, 1);
+                        app.pending_g = false;
+                    }
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let half_page = (app.transcript_view_height / 2).max(1) as u16;
+                        scroll_transcript_down(&mut app, half_page);
+                        app.pending_g = false;
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let half_page = (app.transcript_view_height / 2).max(1) as u16;
+                        scroll_transcript_up(&mut app, half_page);
+                        app.pending_g = false;
+                    }
+                    KeyCode::Char('G') => {
+                        scroll_transcript_to_bottom(&mut app);
+                        app.pending_g = false;
+                    }
+                    KeyCode::Char('g') => {
+                        if app.pending_g {
+                            scroll_transcript_to_top(&mut app);
+                            app.pending_g = false;
+                        } else {
+                            app.pending_g = true;
+                            app.status_message = "g pressed. Press g again for top.".to_string();
+                        }
+                    }
                     KeyCode::Char('i') => {
+                        app.pending_g = false;
                         if app.is_busy() {
                             app.status_message =
                                 "Wait for streaming to finish or press Esc to cancel.".to_string();
@@ -197,19 +255,24 @@ fn run_loop(
                         }
                     }
                     KeyCode::Char(':') => {
+                        app.pending_g = false;
                         app.mode = InputMode::CommandPalette;
                         app.command_input.clear();
                         app.status_message = "Command palette open.".to_string();
                     }
                     KeyCode::Esc => {
+                        app.pending_g = false;
                         if app.is_busy() {
                             cancel_request(&mut app, false);
                         }
                     }
-                    _ => {}
+                    _ => {
+                        app.pending_g = false;
+                    }
                 },
                 InputMode::Insert => match key.code {
                     KeyCode::Esc => {
+                        app.pending_g = false;
                         app.mode = InputMode::Normal;
                         app.status_message = "Normal mode.".to_string();
                     }
@@ -226,6 +289,7 @@ fn run_loop(
                 },
                 InputMode::CommandPalette => match key.code {
                     KeyCode::Esc => {
+                        app.pending_g = false;
                         app.mode = InputMode::Normal;
                         app.command_input.clear();
                         app.status_message = "Command cancelled.".to_string();
@@ -290,6 +354,7 @@ fn submit_composer_message(app: &mut AppState) {
         handle,
     });
     app.mode = InputMode::Normal;
+    app.transcript_follow = true;
     app.status_message = "Sending request to Ollama...".to_string();
 }
 
@@ -349,6 +414,85 @@ fn cancel_request(app: &mut AppState, silent: bool) {
             app.status_message = "Streaming cancelled.".to_string();
         }
     }
+}
+
+fn transcript_rows(messages: &[ChatMessage]) -> Vec<String> {
+    if messages.is_empty() {
+        return vec!["No messages yet. Press i, type, then Enter.".to_string()];
+    }
+
+    let mut rows = Vec::new();
+    for message in messages {
+        let label = match message.role.as_str() {
+            "user" => "You",
+            "assistant" => "Assistant",
+            _ => "System",
+        };
+        let content = if message.content.is_empty() {
+            String::new()
+        } else {
+            message.content.clone()
+        };
+        let mut lines = content.lines();
+        if let Some(first) = lines.next() {
+            rows.push(format!("{label}: {first}"));
+            for line in lines {
+                rows.push(format!("  {line}"));
+            }
+        } else {
+            rows.push(format!("{label}:"));
+        }
+        rows.push(String::new());
+    }
+    rows
+}
+
+fn total_wrapped_lines(rows: &[String], width: usize) -> usize {
+    rows.iter().map(|row| wrapped_line_count(row, width)).sum()
+}
+
+fn wrapped_line_count(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let chars = text.chars().count();
+    let len = chars.max(1);
+    len.div_ceil(width)
+}
+
+fn max_scroll_for_view(total_lines: usize, view_height: usize) -> u16 {
+    total_lines
+        .saturating_sub(view_height)
+        .min(u16::MAX as usize) as u16
+}
+
+fn scroll_transcript_down(app: &mut AppState, lines: u16) {
+    let rows = transcript_rows(&app.messages);
+    let total_lines = total_wrapped_lines(&rows, app.transcript_view_width);
+    let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
+    let next = app.transcript_scroll.saturating_add(lines);
+    app.transcript_scroll = next.min(max_scroll);
+    app.transcript_follow = app.transcript_scroll >= max_scroll;
+}
+
+fn scroll_transcript_up(app: &mut AppState, lines: u16) {
+    app.transcript_scroll = app.transcript_scroll.saturating_sub(lines);
+    app.transcript_follow = false;
+}
+
+fn scroll_transcript_to_top(app: &mut AppState) {
+    app.transcript_scroll = 0;
+    app.transcript_follow = false;
+    app.status_message = "Transcript: top".to_string();
+}
+
+fn scroll_transcript_to_bottom(app: &mut AppState) {
+    let rows = transcript_rows(&app.messages);
+    let total_lines = total_wrapped_lines(&rows, app.transcript_view_width);
+    let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
+    app.transcript_scroll = max_scroll;
+    app.transcript_follow = true;
+    app.status_message = "Transcript: bottom".to_string();
 }
 
 #[derive(Serialize)]

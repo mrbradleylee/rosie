@@ -78,9 +78,14 @@ In the default TUI scaffold:
 - in `Insert`, type in the composer, use `Backspace` to edit, and press `Enter` to send to Ollama
 - press `Esc` to return to `Normal`
 - assistant tokens stream into transcript as they arrive
+- use `j`/`k` (or arrow keys) in `Normal` to scroll transcript
+- use `PageUp`/`PageDown` for full-page scroll and `Ctrl+u`/`Ctrl+d` for half-page scroll
+- use `gg` to jump to top and `G` to jump to bottom
 - press `:` in `Normal` to open the floating command panel, then run commands like `:help`, `:new`, `:model`, and `:quit`
 - press `Esc` in `Normal` to cancel an in-flight request
 - `Ctrl+C` quits from any mode
+
+Transcript and composer text are wrapped to pane width so output stays constrained to visible layout bounds.
 
 ## Configuration
 

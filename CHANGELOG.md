@@ -10,6 +10,7 @@
 - Added TUI modal interaction with explicit `Normal`/`Insert` modes (`i` to enter input, `Esc` to return to normal)
 - Added floating `:` command panel in the TUI scaffold with initial commands (`:help`, `:new`, `:model`, `:quit`)
 - Added Ollama-backed TUI chat requests from composer input (`Enter` in `Insert`), with assistant tokens streamed into transcript
+- Added transcript scrolling controls in TUI `Normal` mode (`j`/`k`, arrow keys, `PageUp`/`PageDown`, `Ctrl+u`/`Ctrl+d`, `gg`, `G`) with auto-follow to newest output during streaming
 
 ### Changed
 
@@ -20,6 +21,7 @@
 - Updated README and man page to document `--ask`/`--cmd`, TUI-default entrypoint behavior, and config-only model/host resolution
 - Updated `--configure` model prompts so numeric model selection works consistently for default, ask, and cmd model choices, with explicit confirm/reselect after resolving each choice
 - Updated TUI key behavior so `Esc` in `Normal` cancels in-flight requests and `Ctrl+C` quits from any mode
+- Updated TUI transcript/composer rendering to wrap and stay constrained to pane bounds
 
 ### Removed
 
