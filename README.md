@@ -85,6 +85,7 @@ In the default TUI:
 - use `gg` to jump to top and `G` to jump to bottom
 - when `Sessions` is focused, press `Enter` to switch to the selected session
 - when `Sessions` is focused, press `d` then `d` to delete the selected session (with confirmation)
+- press `?` in `Normal` (or run `:help`) to open the full key/command help panel
 - press `:` in `Normal` to open the floating command panel, then run:
   - `:help`
   - `:new`

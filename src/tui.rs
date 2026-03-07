@@ -122,6 +122,7 @@ enum InputMode {
     CommandPalette,
     ConfirmDelete,
     ModelSelect,
+    Help,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -363,6 +364,7 @@ fn run_loop(
                 InputMode::CommandPalette => "COMMAND",
                 InputMode::ConfirmDelete => "CONFIRM",
                 InputMode::ModelSelect => "MODELS",
+                InputMode::Help => "HELP",
             };
             let header = Paragraph::new(format!(
                 "Rosie TUI | Mode: {mode_label} | Host: {} | Model: {}{}",
@@ -444,15 +446,16 @@ fn run_loop(
             let footer_help = match app.mode {
                 InputMode::Normal => {
                     if app.is_busy() {
-                        "Tab: focus pane | j/k: move | Enter: switch session | dd: delete selected session | i: insert (disabled) | : commands | Esc: cancel stream | Ctrl+C: quit"
+                        "Tab: focus | j/k: move | Enter: open | i: compose (disabled) | : cmd | ?: help | Esc: cancel stream | Ctrl+C: quit"
                     } else {
-                        "Tab: focus pane | j/k: move | Enter: switch session | dd: delete selected session | i: insert | : commands | Ctrl+C: quit"
+                        "Tab: focus | j/k: move | Enter: open | i: compose | : cmd | ?: help | Ctrl+C: quit"
                     }
                 }
                 InputMode::Insert => "Enter: send | Backspace: edit | Esc: normal",
                 InputMode::CommandPalette => "Type command | Enter: run | Esc: cancel",
                 InputMode::ConfirmDelete => "Confirm delete: Enter/y=yes, n/Esc=no",
                 InputMode::ModelSelect => "Model picker: j/k move | Enter select | Esc cancel",
+                InputMode::Help => "Help: Esc/q/? close",
             };
             let footer = Paragraph::new(format!("{} | {}", footer_help, app.status_message))
                 .style(Style::default().add_modifier(Modifier::DIM));
@@ -508,6 +511,16 @@ fn run_loop(
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, popup);
                 frame.render_widget(picker, popup);
+            } else if app.mode == InputMode::Help {
+                let popup = centered_rect(78, 14, frame.area());
+                let rows = help_rows();
+                let lines: Vec<Line<'_>> = rows.iter().map(|row| Line::from(row.as_str())).collect();
+                let help = Paragraph::new(lines)
+                    .block(Block::default().borders(Borders::ALL).title("Help"))
+                    .alignment(Alignment::Left)
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(Clear, popup);
+                frame.render_widget(help, popup);
             }
         })?;
 
@@ -646,6 +659,12 @@ fn run_loop(
                         app.command_input.clear();
                         app.status_message = "Command palette open.".to_string();
                     }
+                    KeyCode::Char('?') => {
+                        app.pending_g = false;
+                        app.pending_d = false;
+                        app.mode = InputMode::Help;
+                        app.status_message = "Help open.".to_string();
+                    }
                     KeyCode::Esc => {
                         app.pending_g = false;
                         app.pending_d = false;
@@ -729,6 +748,13 @@ fn run_loop(
                     }
                     KeyCode::Enter => {
                         apply_selected_model(&mut app);
+                    }
+                    _ => {}
+                },
+                InputMode::Help => match key.code {
+                    KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter => {
+                        app.mode = InputMode::Normal;
+                        app.status_message = "Help closed.".to_string();
                     }
                     _ => {}
                 },
@@ -1223,6 +1249,26 @@ fn apply_selected_model(app: &mut AppState) {
     app.status_message = format!("Active model set to {selected}");
 }
 
+fn help_rows() -> Vec<String> {
+    vec![
+        "Navigation".to_string(),
+        "  Tab: toggle focus between sessions and transcript".to_string(),
+        "  j/k or arrows: move/scroll in focused pane".to_string(),
+        "  gg / G: top / bottom in focused pane".to_string(),
+        "  Enter (sessions focus): switch session".to_string(),
+        "  dd (sessions focus): delete selected session (with confirmation)".to_string(),
+        "".to_string(),
+        "Composer".to_string(),
+        "  i: enter insert mode, Enter: send, Esc: return to normal".to_string(),
+        "".to_string(),
+        "Commands".to_string(),
+        "  :new  :rename [title]  :delete  :model  :models  :quit".to_string(),
+        "  :help or ? opens this panel".to_string(),
+        "".to_string(),
+        "Global: Ctrl+C quits; Esc cancels in-flight stream in normal mode".to_string(),
+    ]
+}
+
 fn transcript_rows(messages: &[ChatMessage]) -> Vec<String> {
     if messages.is_empty() {
         return vec!["No messages yet. Press i, type, then Enter.".to_string()];
@@ -1529,8 +1575,8 @@ fn run_palette_command(app: &mut AppState) -> bool {
             false
         }
         "help" => {
-            app.status_message =
-                "Commands: :help :new :rename [title] :delete :model :models :quit".to_string();
+            app.mode = InputMode::Help;
+            app.status_message = "Help open.".to_string();
             false
         }
         _ => {
@@ -1684,8 +1730,8 @@ mod tests {
 
             app.command_input = ":help".to_string();
             assert!(!run_palette_command(&mut app));
-            assert!(!app.status_message.contains(":archive"));
-            assert!(app.status_message.contains(":models"));
+            assert!(matches!(app.mode, InputMode::Help));
+            assert_eq!(app.status_message, "Help open.");
         }
 
         let _ = fs::remove_file(&db_path);

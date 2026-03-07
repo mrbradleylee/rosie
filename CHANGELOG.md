@@ -38,6 +38,7 @@
 - Updated TUI send/session-switch/new-session flows to re-focus transcript and follow newest output more reliably
 - Updated TUI composer to show a visible cursor in `Insert` mode
 - Updated transcript scroll bounds to use Ratatui rendered line counts, improving bottom-of-chat scrolling for long wrapped output
+- Updated TUI footer help text to a compact set of core actions and moved full key/command guidance into a dedicated help modal (`?` / `:help`)
 
 ### Removed
 
