@@ -35,6 +35,10 @@
 - Added first-pass markdown rendering for assistant output (headings, lists, blockquotes, horizontal rules, inline emphasis/code, and inline links), while keeping fenced code block rendering/highlighting intact
 - Updated README and man page to match current landing-first TUI flow, keybindings/help behavior, session restore behavior, theme install notes, and transcript rendering capabilities
 - Fixed CLI `--help` text to correctly show version short flag as `-V` (not `-v`)
+- Refactored TUI internals to split frame rendering and input handling into dedicated functions by concern/mode, reducing `run_loop` complexity without changing behavior
+- Consolidated command palette command metadata so command suggestions, help listing, and dispatch paths stay in sync
+- Refactored transcript rendering internals with dedicated helpers for assistant separators, content normalization, non-assistant text rows, and fenced-code block flushing
+- Added transcript rendering unit coverage for assistant separators/markers, fenced-code framing/padding, non-assistant prefix behavior, and markdown line invariants
 
 ## 0.7.0
 

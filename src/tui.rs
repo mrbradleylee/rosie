@@ -1,6 +1,6 @@
 use crate::theme::{ThemePalette, config_dir_from_env, discover_config_theme_names, resolve_theme};
 use anyhow::{Result, anyhow};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -511,828 +511,905 @@ fn run_loop(
         process_model_fetch_events(&mut app);
         process_title_fetch_events(&mut app);
 
-        terminal.draw(|frame| {
-            let theme = app.theme;
-            frame.render_widget(
-                Block::default().style(Style::default().bg(theme.base)),
-                frame.area(),
-            );
-            let root = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3),
-                    Constraint::Min(1),
-                    Constraint::Length(3),
-                    Constraint::Length(1),
-                ])
-                .split(frame.area());
-
-            let mode_label = match app.mode {
-                InputMode::Landing => "LANDING",
-                InputMode::Normal => "NORMAL",
-                InputMode::Insert => "INSERT",
-                InputMode::CommandPalette => "COMMAND",
-                InputMode::SessionManager => "SESSIONS",
-                InputMode::SessionRename => "RENAME",
-                InputMode::ConfirmDelete => "CONFIRM",
-                InputMode::ModelSelect => "MODELS",
-                InputMode::ThemeSelect => "THEMES",
-                InputMode::Help => "HELP",
-            };
-            let header_session_title = if app.active_session_id > 0 {
-                active_session_title(&app)
-            } else {
-                "New chat".to_string()
-            };
-            let is_streaming = app.is_busy();
-            let streaming_label = streaming_status_label(is_streaming);
-            let streaming_color = if is_streaming {
-                theme.warn
-            } else {
-                theme.success
-            };
-            let stream_width = streaming_label.chars().count();
-            let fixed_width = "Session: ".chars().count() + " | ".chars().count() + stream_width;
-            let max_width = root[0].width.saturating_sub(2) as usize;
-            let session_max = max_width.saturating_sub(fixed_width);
-            let header_session = truncate_with_ellipsis(&header_session_title, session_max);
-            let header_line = Line::from(vec![
-                Span::styled("Session: ", Style::default().fg(theme.title_meta)),
-                Span::styled(
-                    header_session,
-                    Style::default()
-                        .fg(theme.title_value)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" | ", Style::default().fg(theme.title_meta)),
-                Span::styled(streaming_label, Style::default().fg(streaming_color)),
-            ]);
-            let transcript_active = app.mode == InputMode::Normal;
-            let composer_active = app.mode == InputMode::Insert;
-            let header = Paragraph::new(header_line)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(Line::from(vec![Span::styled(
-                        "🤖 Rosie",
-                        Style::default()
-                            .fg(theme.title_label)
-                            .add_modifier(Modifier::BOLD),
-                    )]))
-                    .style(Style::default().bg(theme.surface).fg(theme.text))
-                    .border_style(Style::default().fg(theme.highlight_high)),
-            )
-            .style(
-                Style::default()
-                    .bg(theme.surface)
-                    .fg(theme.text)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_widget(header, root[0]);
-
-            if app.mode == InputMode::Landing {
-                let landing_space = Rect {
-                    x: root[1].x,
-                    y: root[1].y,
-                    width: root[1].width,
-                    height: root[1].height.saturating_add(root[2].height),
-                };
-                let landing_height = 16u16.min(landing_space.height).max(8);
-                let landing_rect = centered_rect(72, landing_height, landing_space);
-                let landing_layout = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(3)])
-                    .split(landing_rect);
-
-                let hero_lines = vec![
-                    Line::styled(
-                        "🤖 Rosie".to_string(),
-                        Style::default()
-                            .fg(theme.title_label)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Line::styled(
-                        "Fast local chat in your terminal.".to_string(),
-                        Style::default().fg(theme.text),
-                    ),
-                    Line::raw(""),
-                    Line::styled(
-                        "Quick commands".to_string(),
-                        Style::default()
-                            .fg(theme.title_value)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Line::styled(
-                        "  :session   open sessions list".to_string(),
-                        Style::default().fg(theme.text),
-                    ),
-                    Line::styled(
-                        "  :models    switch model".to_string(),
-                        Style::default().fg(theme.text),
-                    ),
-                    Line::styled(
-                        "  :theme     switch theme".to_string(),
-                        Style::default().fg(theme.text),
-                    ),
-                    Line::styled(
-                        "  Ctrl+P     open command palette".to_string(),
-                        Style::default().fg(theme.text),
-                    ),
-                ];
-                let hero = Paragraph::new(hero_lines)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(Line::from(vec![Span::styled(
-                                "Welcome",
-                                Style::default()
-                                    .fg(theme.title_label)
-                                    .add_modifier(Modifier::BOLD),
-                            )]))
-                            .style(Style::default().bg(theme.highlight_low).fg(theme.text))
-                            .border_style(Style::default().fg(theme.border_active)),
-                    )
-                    .style(Style::default().bg(theme.highlight_low).fg(theme.text))
-                    .alignment(Alignment::Left)
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(hero, landing_layout[0]);
-
-                let prompt = Paragraph::new(app.composer_input.as_str())
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(Line::from(vec![
-                                Span::styled(
-                                    "Start Chat",
-                                    Style::default()
-                                        .fg(theme.title_label)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled(" | ", Style::default().fg(theme.title_meta)),
-                                Span::styled(
-                                    "Enter to apply",
-                                    Style::default().fg(theme.title_value_alt),
-                                ),
-                                Span::styled(" | ", Style::default().fg(theme.title_meta)),
-                                Span::styled("Default:", Style::default().fg(theme.title_meta)),
-                                Span::styled(" ", Style::default().fg(theme.title_meta)),
-                                Span::styled(
-                                    app.default_model.clone(),
-                                    Style::default().fg(theme.title_value_alt),
-                                ),
-                            ]))
-                            .style(Style::default().bg(theme.surface_alt).fg(theme.text))
-                            .border_style(Style::default().fg(theme.accent)),
-                    )
-                    .style(Style::default().bg(theme.surface_alt).fg(theme.text))
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(prompt, landing_layout[2]);
-                let prompt_inner = landing_layout[2].inner(ratatui::layout::Margin {
-                    horizontal: 1,
-                    vertical: 1,
-                });
-                let cursor_offset = app.composer_input.chars().count() as u16;
-                let cursor_x =
-                    prompt_inner.x + cursor_offset.min(prompt_inner.width.saturating_sub(1));
-                frame.set_cursor_position((cursor_x, prompt_inner.y));
-            } else {
-                let transcript_inner = root[1].inner(ratatui::layout::Margin {
-                    horizontal: 1,
-                    vertical: 1,
-                });
-                app.transcript_view_width = transcript_inner.width.max(1) as usize;
-                app.transcript_view_height = transcript_inner.height.max(1) as usize;
-                let transcript_render = transcript_lines(
-                    &app.messages,
-                    app.is_busy(),
-                    theme,
-                    app.transcript_view_width,
-                );
-                app.transcript_assistant_markers = transcript_render.assistant_markers;
-                let conversation_title = conversation_header_title(&app);
-                let mut transcript_title_spans = vec![Span::styled(
-                    conversation_title,
-                    Style::default()
-                        .fg(theme.title_label)
-                        .add_modifier(Modifier::BOLD),
-                )];
-                transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
-                transcript_title_spans.push(Span::styled(
-                    transcript_position_label(app.transcript_scroll, app.transcript_max_scroll),
-                    Style::default().fg(theme.title_meta),
-                ));
-                if !app.transcript_follow && app.transcript_scroll > 0 {
-                    transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
-                    transcript_title_spans.push(Span::styled("↑ older", Style::default().fg(theme.muted)));
-                }
-                if !app.transcript_follow && app.transcript_scroll < app.transcript_max_scroll {
-                    transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
-                    transcript_title_spans.push(Span::styled("↓ new", Style::default().fg(theme.success)));
-                }
-                let transcript_base = Paragraph::new(transcript_render.lines)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(Line::from(transcript_title_spans))
-                            .style(Style::default().bg(theme.highlight_low).fg(theme.text))
-                            .border_style(Style::default().fg(if transcript_active {
-                                theme.border_active
-                            } else {
-                                theme.border
-                            })),
-                    )
-                    .style(Style::default().bg(theme.highlight_low).fg(theme.text))
-                    .wrap(Wrap { trim: false });
-                let total_lines = transcript_base.line_count(app.transcript_view_width as u16);
-                let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
-                app.transcript_max_scroll = max_scroll;
-                if app.transcript_follow || app.transcript_scroll > max_scroll {
-                    app.transcript_scroll = max_scroll;
-                }
-                let transcript = transcript_base.scroll((app.transcript_scroll, 0));
-                frame.render_widget(transcript, root[1]);
-
-                let composer = Paragraph::new(app.composer_input.as_str())
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(Line::from(vec![
-                                Span::styled(
-                                    "Chat",
-                                    Style::default()
-                                        .fg(theme.title_label)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled(" | ", Style::default().fg(theme.title_meta)),
-                                Span::styled(
-                                    format!("[{}]", app.model),
-                                    Style::default()
-                                        .fg(theme.title_value_alt)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                            ]))
-                            .style(Style::default().bg(theme.surface_alt).fg(theme.text))
-                            .border_style(Style::default().fg(if composer_active {
-                                theme.accent
-                            } else {
-                                theme.border
-                            })),
-                    )
-                    .style(Style::default().bg(theme.surface_alt).fg(theme.text))
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(composer, root[2]);
-                if app.mode == InputMode::Insert {
-                    let composer_inner = root[2].inner(ratatui::layout::Margin {
-                        horizontal: 1,
-                        vertical: 1,
-                    });
-                    let cursor_offset = app.composer_input.chars().count() as u16;
-                    let cursor_x =
-                        composer_inner.x + cursor_offset.min(composer_inner.width.saturating_sub(1));
-                    frame.set_cursor_position((cursor_x, composer_inner.y));
-                }
-            }
-
-            let footer_help = match app.mode {
-                InputMode::Landing => "Type message | Enter send | Ctrl+P/: cmd | ?: help",
-                InputMode::Normal => {
-                    if app.is_busy() {
-                        "[/] assistant jump | i compose (disabled) | : cmd | ?: help | Esc cancel stream"
-                    } else {
-                        "[/] assistant jump | i compose | : cmd | ?: help"
-                    }
-                }
-                InputMode::Insert => "Enter: send | Backspace: edit | Esc: normal",
-                InputMode::CommandPalette => "Type command | j/k pick | Enter run | Esc cancel",
-                InputMode::SessionManager => {
-                    "j/k move | Enter switch | n new | r rename | d delete | Esc close"
-                }
-                InputMode::SessionRename => "Type title | Enter save | Esc cancel",
-                InputMode::ConfirmDelete => "Confirm delete: Enter/y=yes, n/Esc=no",
-                InputMode::ModelSelect => "Model picker: j/k move | Enter select | Esc cancel",
-                InputMode::ThemeSelect => "Theme picker: j/k move | Enter select | Esc cancel",
-                InputMode::Help => "Help: Esc/q/? close",
-            };
-            let footer_width = root[3].width as usize;
-            let compact_help = if footer_width < 80 {
-                compact_footer_help(app.mode, app.is_busy())
-            } else {
-                footer_help.to_string()
-            };
-            let mode_chip = mode_label.to_string();
-            let status_text = if app.status_message.trim().is_empty() {
-                "Ready.".to_string()
-            } else {
-                app.status_message.clone()
-            };
-            let mut footer_spans = vec![Span::styled(
-                format!("[{mode_chip}] "),
-                Style::default()
-                    .bg(theme.surface_alt)
-                    .fg(status_mode_color(app.mode, theme))
-                    .add_modifier(Modifier::BOLD),
-            )];
-            footer_spans.push(Span::styled(compact_help, Style::default().fg(theme.text)));
-            footer_spans.push(Span::styled(" | ", Style::default().fg(theme.highlight_mid)));
-            footer_spans.push(Span::styled(
-                status_text.clone(),
-                Style::default().fg(theme.text),
-            ));
-            let footer = Paragraph::new(Line::from(footer_spans))
-                .style(Style::default().bg(theme.surface_alt).fg(theme.text));
-            frame.render_widget(footer, root[3]);
-
-            if app.mode == InputMode::CommandPalette {
-                let popup = centered_rect(70, 12, frame.area());
-                let mut rows: Vec<Line<'_>> = Vec::new();
-                rows.push(Line::from(vec![
-                    Span::styled(":", Style::default().fg(theme.title_meta)),
-                    Span::styled(
-                        app.command_input.clone(),
-                        Style::default().fg(theme.title_value_alt),
-                    ),
-                ]));
-                rows.push(Line::raw(""));
-                rows.push(Line::styled(
-                    "Commands (j/k or arrows to select, Enter to run):".to_string(),
-                    Style::default()
-                        .fg(theme.title_label)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                let suggestions = palette_suggestions(&app.command_input);
-                if suggestions.is_empty() {
-                    rows.push(Line::styled(
-                        "  (no matching commands)".to_string(),
-                        Style::default().fg(theme.muted),
-                    ));
-                } else {
-                    let selected = app
-                        .command_selected_index
-                        .min(suggestions.len().saturating_sub(1));
-                    for (idx, item) in suggestions.iter().enumerate() {
-                        let marker = if idx == selected { ">" } else { " " };
-                        if idx == selected {
-                            let selected_fg = contrast_text_for_bg(theme.success, theme);
-                            rows.push(Line::from(vec![
-                                Span::styled(
-                                    marker.to_string(),
-                                    Style::default()
-                                        .fg(theme.modal_selected_bg)
-                                        .bg(theme.success)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled(
-                                    " ".to_string(),
-                                    Style::default().fg(selected_fg).bg(theme.success),
-                                ),
-                                Span::styled(
-                                    item.to_string(),
-                                    Style::default()
-                                        .fg(selected_fg)
-                                        .bg(theme.success)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                            ]));
-                        } else {
-                            let item_color = if *item == "quit" {
-                                theme.warn
-                            } else {
-                                theme.text
-                            };
-                            rows.push(Line::from(vec![
-                                Span::styled(marker.to_string(), Style::default().fg(theme.muted)),
-                                Span::raw(" "),
-                                Span::styled(item.to_string(), Style::default().fg(item_color)),
-                            ]));
-                        }
-                    }
-                }
-                let command = Paragraph::new(rows)
-                    .block(modal_block(theme, "Command"))
-                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
-                    .alignment(Alignment::Left)
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(Clear, popup);
-                frame.render_widget(command, popup);
-            } else if app.mode == InputMode::SessionManager || app.mode == InputMode::SessionRename {
-                let popup = centered_rect(90, 18, frame.area());
-                let rows = session_manager_rows(&mut app, popup.height as usize);
-                let lines = modal_lines_from_rows(&rows, theme);
-                let session_modal = Paragraph::new(lines)
-                    .block(modal_block(theme, "Sessions"))
-                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
-                    .alignment(Alignment::Left)
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(Clear, popup);
-                frame.render_widget(session_modal, popup);
-
-                if app.mode == InputMode::SessionRename {
-                    let inner = popup.inner(ratatui::layout::Margin {
-                        horizontal: 1,
-                        vertical: 1,
-                    });
-                    let cursor_offset = app.session_rename_input.chars().count() as u16;
-                    let cursor_x = inner.x + (9 + cursor_offset).min(inner.width.saturating_sub(1));
-                    let cursor_y = inner.y + 2;
-                    frame.set_cursor_position((cursor_x, cursor_y));
-                }
-            } else if app.mode == InputMode::ConfirmDelete {
-                let popup = centered_rect(60, 5, frame.area());
-                let target = app
-                    .pending_delete_session_id
-                    .map(|id| format!("#{id}"))
-                    .unwrap_or_else(|| "selected session".to_string());
-                let confirm_lines = vec![
-                    Line::styled(
-                        format!("Delete session {target}?"),
-                        Style::default()
-                            .fg(theme.warn)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Line::styled(
-                        "This cannot be undone.".to_string(),
-                        Style::default().fg(theme.error),
-                    ),
-                    Line::styled(
-                        "[Y/n]".to_string(),
-                        Style::default()
-                            .fg(theme.title_label)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ];
-                let confirm = Paragraph::new(confirm_lines)
-                    .block(modal_block(theme, "Confirm Delete"))
-                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
-                    .alignment(Alignment::Left);
-                frame.render_widget(Clear, popup);
-                frame.render_widget(confirm, popup);
-            } else if app.mode == InputMode::ModelSelect {
-                let popup = centered_rect(70, 12, frame.area());
-                let mut rows = Vec::new();
-                if app.model_loading {
-                    rows.push("Loading models from Ollama...".to_string());
-                } else if let Some(error) = app.model_error.as_deref() {
-                    rows.push(format!("Failed to load models: {error}"));
-                } else if app.model_options.is_empty() {
-                    rows.push("No models available from /api/tags".to_string());
-                } else {
-                    rows.push("Select a model (Enter to apply):".to_string());
-                    rows.push(String::new());
-                    for (idx, model) in app.model_options.iter().enumerate() {
-                        let marker = if idx == app.model_selected_index {
-                            ">"
-                        } else {
-                            " "
-                        };
-                        let active = if *model == app.model { "*" } else { " " };
-                        rows.push(format!("{marker}{active} {model}"));
-                    }
-                }
-
-                let lines = modal_lines_from_rows(&rows, theme);
-                let picker = Paragraph::new(lines)
-                    .block(modal_block(theme, "Models"))
-                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
-                    .alignment(Alignment::Left)
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(Clear, popup);
-                frame.render_widget(picker, popup);
-            } else if app.mode == InputMode::ThemeSelect {
-                let popup = centered_rect(70, 12, frame.area());
-                let mut rows = Vec::new();
-                if app.theme_options.is_empty() {
-                    rows.push("No themes found in config/themes".to_string());
-                    rows.push("Add *.toml files under ~/.config/rosie/themes".to_string());
-                } else {
-                    rows.push("Select a theme (Enter to apply):".to_string());
-                    rows.push(String::new());
-                    for (idx, theme_name) in app.theme_options.iter().enumerate() {
-                        let marker = if idx == app.theme_selected_index {
-                            ">"
-                        } else {
-                            " "
-                        };
-                        let active = if *theme_name == app.theme_key { "*" } else { " " };
-                        rows.push(format!("{marker}{active} {theme_name}"));
-                    }
-                }
-                let lines = modal_lines_from_rows(&rows, theme);
-                let picker = Paragraph::new(lines)
-                    .block(modal_block(theme, "Themes"))
-                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
-                    .alignment(Alignment::Left)
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(Clear, popup);
-                frame.render_widget(picker, popup);
-            } else if app.mode == InputMode::Help {
-                let popup = centered_rect(78, 16, frame.area());
-                let lines = help_lines(theme);
-                let help = Paragraph::new(lines)
-                    .block(modal_block(theme, "Help"))
-                    .style(Style::default().bg(theme.modal_bg).fg(theme.text))
-                    .alignment(Alignment::Left)
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(Clear, popup);
-                frame.render_widget(help, popup);
-            }
-        })?;
+        terminal.draw(|frame| draw_frame(frame, &mut app))?;
 
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
+            && handle_key_event(&mut app, key)
         {
-            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                cancel_request(&mut app, true);
-                cancel_model_fetch(&mut app);
-                cancel_title_fetches(&mut app);
-                break;
-            }
-
-            match app.mode {
-                InputMode::Landing => match key.code {
-                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.mode = InputMode::CommandPalette;
-                        app.command_input.clear();
-                        app.command_selected_index = 0;
-                        app.status_message = "Command palette open.".to_string();
-                    }
-                    KeyCode::Char(':') => {
-                        app.mode = InputMode::CommandPalette;
-                        app.command_input.clear();
-                        app.command_selected_index = 0;
-                        app.status_message = "Command palette open.".to_string();
-                    }
-                    KeyCode::F(1) => {
-                        app.mode = InputMode::Help;
-                        app.status_message = "Help open.".to_string();
-                    }
-                    KeyCode::Enter => {
-                        submit_composer_message(&mut app);
-                    }
-                    KeyCode::Backspace => {
-                        app.composer_input.pop();
-                    }
-                    KeyCode::Esc => {
-                        app.composer_input.clear();
-                        app.status_message = "Landing input cleared.".to_string();
-                    }
-                    KeyCode::Char(ch) => {
-                        app.composer_input.push(ch);
-                    }
-                    _ => {}
-                },
-                InputMode::Normal => match key.code {
-                    KeyCode::PageDown => {
-                        let page = app.transcript_view_height as u16;
-                        scroll_transcript_down(&mut app, page);
-                        app.pending_g = false;
-                    }
-                    KeyCode::PageUp => {
-                        let page = app.transcript_view_height as u16;
-                        scroll_transcript_up(&mut app, page);
-                        app.pending_g = false;
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        scroll_transcript_down(&mut app, 1);
-                        app.pending_g = false;
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        scroll_transcript_up(&mut app, 1);
-                        app.pending_g = false;
-                    }
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let half_page = (app.transcript_view_height / 2).max(1) as u16;
-                        scroll_transcript_down(&mut app, half_page);
-                        app.pending_g = false;
-                    }
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let half_page = (app.transcript_view_height / 2).max(1) as u16;
-                        scroll_transcript_up(&mut app, half_page);
-                        app.pending_g = false;
-                    }
-                    KeyCode::Char(']') => {
-                        jump_to_next_assistant_block(&mut app);
-                        app.pending_g = false;
-                    }
-                    KeyCode::Char('[') => {
-                        jump_to_prev_assistant_block(&mut app);
-                        app.pending_g = false;
-                    }
-                    KeyCode::Char('G') => {
-                        scroll_transcript_to_bottom(&mut app);
-                        app.pending_g = false;
-                    }
-                    KeyCode::Char('g') => {
-                        if app.pending_g {
-                            scroll_transcript_to_top(&mut app);
-                            app.pending_g = false;
-                        } else {
-                            app.pending_g = true;
-                            app.status_message = "g pressed. Press g again for top.".to_string();
-                        }
-                    }
-                    KeyCode::Char('i') => {
-                        app.pending_g = false;
-                        if app.is_busy() {
-                            app.status_message =
-                                "Wait for streaming to finish or press Esc to cancel.".to_string();
-                        } else {
-                            app.mode = InputMode::Insert;
-                            app.status_message = "Insert mode.".to_string();
-                        }
-                    }
-                    KeyCode::Char(':') => {
-                        app.pending_g = false;
-                        app.mode = InputMode::CommandPalette;
-                        app.command_input.clear();
-                        app.command_selected_index = 0;
-                        app.status_message = "Command palette open.".to_string();
-                    }
-                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.pending_g = false;
-                        app.mode = InputMode::CommandPalette;
-                        app.command_input.clear();
-                        app.command_selected_index = 0;
-                        app.status_message = "Command palette open.".to_string();
-                    }
-                    KeyCode::Char('?') => {
-                        app.pending_g = false;
-                        app.mode = InputMode::Help;
-                        app.status_message = "Help open.".to_string();
-                    }
-                    KeyCode::Esc => {
-                        app.pending_g = false;
-                        if app.is_busy() {
-                            cancel_request(&mut app, false);
-                        }
-                    }
-                    _ => {
-                        app.pending_g = false;
-                    }
-                },
-                InputMode::Insert => match key.code {
-                    KeyCode::Esc => {
-                        app.mode = InputMode::Normal;
-                        app.status_message = "Normal mode.".to_string();
-                    }
-                    KeyCode::Enter => {
-                        submit_composer_message(&mut app);
-                    }
-                    KeyCode::Backspace => {
-                        app.composer_input.pop();
-                    }
-                    KeyCode::Char(ch) => {
-                        app.composer_input.push(ch);
-                    }
-                    _ => {}
-                },
-                InputMode::CommandPalette => match key.code {
-                    KeyCode::Esc => {
-                        app.mode = primary_mode_for_app(&app);
-                        app.command_input.clear();
-                        app.command_selected_index = 0;
-                        app.status_message = "Command cancelled.".to_string();
-                    }
-                    KeyCode::Enter => {
-                        if run_palette_selected_command(&mut app) {
-                            cancel_request(&mut app, true);
-                            cancel_model_fetch(&mut app);
-                            cancel_title_fetches(&mut app);
-                            break;
-                        }
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        move_palette_selection_down(&mut app);
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        move_palette_selection_up(&mut app);
-                    }
-                    KeyCode::Backspace => {
-                        app.command_input.pop();
-                        clamp_palette_selection(&mut app);
-                    }
-                    KeyCode::Char(ch) => {
-                        app.command_input.push(ch);
-                        clamp_palette_selection(&mut app);
-                    }
-                    _ => {}
-                },
-                InputMode::SessionManager => match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        app.mode = primary_mode_for_app(&app);
-                        app.status_message = "Session manager closed.".to_string();
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => move_session_selection_down(&mut app, 1),
-                    KeyCode::Char('k') | KeyCode::Up => move_session_selection_up(&mut app, 1),
-                    KeyCode::Char('G') => move_session_selection_to_bottom(&mut app),
-                    KeyCode::Char('g') => {
-                        if app.pending_g {
-                            move_session_selection_to_top(&mut app);
-                            app.pending_g = false;
-                        } else {
-                            app.pending_g = true;
-                        }
-                    }
-                    KeyCode::Char('n') => create_and_activate_session(&mut app),
-                    KeyCode::Char('r') => open_session_rename(&mut app),
-                    KeyCode::Char('d') => open_delete_confirmation_for_selected_session(&mut app),
-                    KeyCode::Enter => {
-                        if switch_to_selected_session(&mut app) {
-                            app.mode = InputMode::Normal;
-                        }
-                    }
-                    _ => {
-                        app.pending_g = false;
-                    }
-                },
-                InputMode::SessionRename => match key.code {
-                    KeyCode::Esc => {
-                        app.mode = InputMode::SessionManager;
-                        app.session_rename_input.clear();
-                        app.status_message = "Session rename cancelled.".to_string();
-                    }
-                    KeyCode::Enter => {
-                        submit_session_rename(&mut app);
-                    }
-                    KeyCode::Backspace => {
-                        app.session_rename_input.pop();
-                    }
-                    KeyCode::Char(ch) => {
-                        app.session_rename_input.push(ch);
-                    }
-                    _ => {}
-                },
-                InputMode::ConfirmDelete => match key.code {
-                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        confirm_delete_session(&mut app);
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                        app.pending_delete_session_id = None;
-                        app.mode = if app.delete_return_to_session_manager {
-                            InputMode::SessionManager
-                        } else {
-                            primary_mode_for_app(&app)
-                        };
-                        app.delete_return_to_session_manager = false;
-                        app.status_message = "Delete cancelled.".to_string();
-                    }
-                    _ => {}
-                },
-                InputMode::ModelSelect => match key.code {
-                    KeyCode::Esc => {
-                        cancel_model_fetch(&mut app);
-                        app.mode = primary_mode_for_app(&app);
-                        app.status_message = "Model picker cancelled.".to_string();
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        if !app.model_options.is_empty() {
-                            app.model_selected_index =
-                                (app.model_selected_index + 1).min(app.model_options.len() - 1);
-                        }
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        if !app.model_options.is_empty() {
-                            app.model_selected_index = app.model_selected_index.saturating_sub(1);
-                        }
-                    }
-                    KeyCode::Enter => {
-                        apply_selected_model(&mut app);
-                    }
-                    _ => {}
-                },
-                InputMode::ThemeSelect => match key.code {
-                    KeyCode::Esc => {
-                        app.mode = primary_mode_for_app(&app);
-                        app.status_message = "Theme picker cancelled.".to_string();
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        if !app.theme_options.is_empty() {
-                            app.theme_selected_index =
-                                (app.theme_selected_index + 1).min(app.theme_options.len() - 1);
-                        }
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        if !app.theme_options.is_empty() {
-                            app.theme_selected_index = app.theme_selected_index.saturating_sub(1);
-                        }
-                    }
-                    KeyCode::Enter => {
-                        apply_selected_theme(&mut app);
-                    }
-                    _ => {}
-                },
-                InputMode::Help => match key.code {
-                    KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter => {
-                        app.mode = primary_mode_for_app(&app);
-                        app.status_message = "Help closed.".to_string();
-                    }
-                    _ => {}
-                },
-            }
+            break;
         }
     }
 
     Ok(())
+}
+
+fn handle_key_event(app: &mut AppState, key: KeyEvent) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        cancel_request(app, true);
+        cancel_model_fetch(app);
+        cancel_title_fetches(app);
+        return true;
+    }
+
+    match app.mode {
+        InputMode::Landing => handle_landing_input(app, key),
+        InputMode::Normal => handle_normal_input(app, key),
+        InputMode::Insert => handle_insert_input(app, key),
+        InputMode::CommandPalette => handle_command_palette_input(app, key),
+        InputMode::SessionManager => handle_session_manager_input(app, key),
+        InputMode::SessionRename => handle_session_rename_input(app, key),
+        InputMode::ConfirmDelete => handle_confirm_delete_input(app, key),
+        InputMode::ModelSelect => handle_model_select_input(app, key),
+        InputMode::ThemeSelect => handle_theme_select_input(app, key),
+        InputMode::Help => handle_help_input(app, key),
+    }
+}
+
+fn open_command_palette(app: &mut AppState) {
+    app.mode = InputMode::CommandPalette;
+    app.command_input.clear();
+    app.command_selected_index = 0;
+    app.status_message = "Command palette open.".to_string();
+}
+
+fn handle_landing_input(app: &mut AppState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            open_command_palette(app);
+        }
+        KeyCode::Char(':') => {
+            open_command_palette(app);
+        }
+        KeyCode::F(1) => {
+            app.mode = InputMode::Help;
+            app.status_message = "Help open.".to_string();
+        }
+        KeyCode::Enter => {
+            submit_composer_message(app);
+        }
+        KeyCode::Backspace => {
+            app.composer_input.pop();
+        }
+        KeyCode::Esc => {
+            app.composer_input.clear();
+            app.status_message = "Landing input cleared.".to_string();
+        }
+        KeyCode::Char(ch) => {
+            app.composer_input.push(ch);
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_normal_input(app: &mut AppState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::PageDown => {
+            let page = app.transcript_view_height as u16;
+            scroll_transcript_down(app, page);
+            app.pending_g = false;
+        }
+        KeyCode::PageUp => {
+            let page = app.transcript_view_height as u16;
+            scroll_transcript_up(app, page);
+            app.pending_g = false;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            scroll_transcript_down(app, 1);
+            app.pending_g = false;
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            scroll_transcript_up(app, 1);
+            app.pending_g = false;
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let half_page = (app.transcript_view_height / 2).max(1) as u16;
+            scroll_transcript_down(app, half_page);
+            app.pending_g = false;
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let half_page = (app.transcript_view_height / 2).max(1) as u16;
+            scroll_transcript_up(app, half_page);
+            app.pending_g = false;
+        }
+        KeyCode::Char(']') => {
+            jump_to_next_assistant_block(app);
+            app.pending_g = false;
+        }
+        KeyCode::Char('[') => {
+            jump_to_prev_assistant_block(app);
+            app.pending_g = false;
+        }
+        KeyCode::Char('G') => {
+            scroll_transcript_to_bottom(app);
+            app.pending_g = false;
+        }
+        KeyCode::Char('g') => {
+            if app.pending_g {
+                scroll_transcript_to_top(app);
+                app.pending_g = false;
+            } else {
+                app.pending_g = true;
+                app.status_message = "g pressed. Press g again for top.".to_string();
+            }
+        }
+        KeyCode::Char('i') => {
+            app.pending_g = false;
+            if app.is_busy() {
+                app.status_message =
+                    "Wait for streaming to finish or press Esc to cancel.".to_string();
+            } else {
+                app.mode = InputMode::Insert;
+                app.status_message = "Insert mode.".to_string();
+            }
+        }
+        KeyCode::Char(':') => {
+            app.pending_g = false;
+            open_command_palette(app);
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.pending_g = false;
+            open_command_palette(app);
+        }
+        KeyCode::Char('?') => {
+            app.pending_g = false;
+            app.mode = InputMode::Help;
+            app.status_message = "Help open.".to_string();
+        }
+        KeyCode::Esc => {
+            app.pending_g = false;
+            if app.is_busy() {
+                cancel_request(app, false);
+            }
+        }
+        _ => {
+            app.pending_g = false;
+        }
+    }
+    false
+}
+
+fn handle_insert_input(app: &mut AppState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = InputMode::Normal;
+            app.status_message = "Normal mode.".to_string();
+        }
+        KeyCode::Enter => {
+            submit_composer_message(app);
+        }
+        KeyCode::Backspace => {
+            app.composer_input.pop();
+        }
+        KeyCode::Char(ch) => {
+            app.composer_input.push(ch);
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_command_palette_input(app: &mut AppState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = primary_mode_for_app(app);
+            app.command_input.clear();
+            app.command_selected_index = 0;
+            app.status_message = "Command cancelled.".to_string();
+        }
+        KeyCode::Enter => {
+            if run_palette_selected_command(app) {
+                cancel_request(app, true);
+                cancel_model_fetch(app);
+                cancel_title_fetches(app);
+                return true;
+            }
+        }
+        KeyCode::Char('j') | KeyCode::Down => move_palette_selection_down(app),
+        KeyCode::Char('k') | KeyCode::Up => move_palette_selection_up(app),
+        KeyCode::Backspace => {
+            app.command_input.pop();
+            clamp_palette_selection(app);
+        }
+        KeyCode::Char(ch) => {
+            app.command_input.push(ch);
+            clamp_palette_selection(app);
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_session_manager_input(app: &mut AppState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.mode = primary_mode_for_app(app);
+            app.status_message = "Session manager closed.".to_string();
+        }
+        KeyCode::Char('j') | KeyCode::Down => move_session_selection_down(app, 1),
+        KeyCode::Char('k') | KeyCode::Up => move_session_selection_up(app, 1),
+        KeyCode::Char('G') => move_session_selection_to_bottom(app),
+        KeyCode::Char('g') => {
+            if app.pending_g {
+                move_session_selection_to_top(app);
+                app.pending_g = false;
+            } else {
+                app.pending_g = true;
+            }
+        }
+        KeyCode::Char('n') => create_and_activate_session(app),
+        KeyCode::Char('r') => open_session_rename(app),
+        KeyCode::Char('d') => open_delete_confirmation_for_selected_session(app),
+        KeyCode::Enter => {
+            if switch_to_selected_session(app) {
+                app.mode = InputMode::Normal;
+            }
+        }
+        _ => {
+            app.pending_g = false;
+        }
+    }
+    false
+}
+
+fn handle_session_rename_input(app: &mut AppState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = InputMode::SessionManager;
+            app.session_rename_input.clear();
+            app.status_message = "Session rename cancelled.".to_string();
+        }
+        KeyCode::Enter => submit_session_rename(app),
+        KeyCode::Backspace => {
+            app.session_rename_input.pop();
+        }
+        KeyCode::Char(ch) => {
+            app.session_rename_input.push(ch);
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_confirm_delete_input(app: &mut AppState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => confirm_delete_session(app),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.pending_delete_session_id = None;
+            app.mode = if app.delete_return_to_session_manager {
+                InputMode::SessionManager
+            } else {
+                primary_mode_for_app(app)
+            };
+            app.delete_return_to_session_manager = false;
+            app.status_message = "Delete cancelled.".to_string();
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_model_select_input(app: &mut AppState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            cancel_model_fetch(app);
+            app.mode = primary_mode_for_app(app);
+            app.status_message = "Model picker cancelled.".to_string();
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if !app.model_options.is_empty() {
+                app.model_selected_index =
+                    (app.model_selected_index + 1).min(app.model_options.len() - 1);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if !app.model_options.is_empty() {
+                app.model_selected_index = app.model_selected_index.saturating_sub(1);
+            }
+        }
+        KeyCode::Enter => apply_selected_model(app),
+        _ => {}
+    }
+    false
+}
+
+fn handle_theme_select_input(app: &mut AppState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = primary_mode_for_app(app);
+            app.status_message = "Theme picker cancelled.".to_string();
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if !app.theme_options.is_empty() {
+                app.theme_selected_index =
+                    (app.theme_selected_index + 1).min(app.theme_options.len() - 1);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if !app.theme_options.is_empty() {
+                app.theme_selected_index = app.theme_selected_index.saturating_sub(1);
+            }
+        }
+        KeyCode::Enter => apply_selected_theme(app),
+        _ => {}
+    }
+    false
+}
+
+fn handle_help_input(app: &mut AppState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter => {
+            app.mode = primary_mode_for_app(app);
+            app.status_message = "Help closed.".to_string();
+        }
+        _ => {}
+    }
+    false
+}
+
+fn draw_frame(frame: &mut ratatui::Frame<'_>, app: &mut AppState) {
+    let theme = app.theme;
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.base)),
+        frame.area(),
+    );
+    let root = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(frame.area());
+
+    render_header(frame, app, root[0], theme);
+    if app.mode == InputMode::Landing {
+        render_landing(frame, app, root[1], root[2], theme);
+    } else {
+        render_main_panes(frame, app, root[1], root[2], theme);
+    }
+    render_footer(frame, app, root[3], theme);
+    render_modal(frame, app, theme);
+}
+
+fn render_header(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Rect, theme: ThemePalette) {
+    let header_session_title = if app.active_session_id > 0 {
+        active_session_title(app)
+    } else {
+        "New chat".to_string()
+    };
+    let is_streaming = app.is_busy();
+    let streaming_label = streaming_status_label(is_streaming);
+    let streaming_color = if is_streaming {
+        theme.warn
+    } else {
+        theme.success
+    };
+    let stream_width = streaming_label.chars().count();
+    let fixed_width = "Session: ".chars().count() + " | ".chars().count() + stream_width;
+    let max_width = area.width.saturating_sub(2) as usize;
+    let session_max = max_width.saturating_sub(fixed_width);
+    let header_session = truncate_with_ellipsis(&header_session_title, session_max);
+    let header_line = Line::from(vec![
+        Span::styled("Session: ", Style::default().fg(theme.title_meta)),
+        Span::styled(
+            header_session,
+            Style::default()
+                .fg(theme.title_value)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" | ", Style::default().fg(theme.title_meta)),
+        Span::styled(streaming_label, Style::default().fg(streaming_color)),
+    ]);
+    let header = Paragraph::new(header_line)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Line::from(vec![Span::styled(
+                    "🤖 Rosie",
+                    Style::default()
+                        .fg(theme.title_label)
+                        .add_modifier(Modifier::BOLD),
+                )]))
+                .style(Style::default().bg(theme.surface).fg(theme.text))
+                .border_style(Style::default().fg(theme.highlight_high)),
+        )
+        .style(
+            Style::default()
+                .bg(theme.surface)
+                .fg(theme.text)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_widget(header, area);
+}
+
+fn render_landing(
+    frame: &mut ratatui::Frame<'_>,
+    app: &mut AppState,
+    transcript_area: Rect,
+    composer_area: Rect,
+    theme: ThemePalette,
+) {
+    let landing_space = Rect {
+        x: transcript_area.x,
+        y: transcript_area.y,
+        width: transcript_area.width,
+        height: transcript_area.height.saturating_add(composer_area.height),
+    };
+    let landing_height = 16u16.min(landing_space.height).max(8);
+    let landing_rect = centered_rect(72, landing_height, landing_space);
+    let landing_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(3),
+        ])
+        .split(landing_rect);
+
+    let hero_lines = vec![
+        Line::styled(
+            "🤖 Rosie".to_string(),
+            Style::default()
+                .fg(theme.title_label)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            "Fast local chat in your terminal.".to_string(),
+            Style::default().fg(theme.text),
+        ),
+        Line::raw(""),
+        Line::styled(
+            "Quick commands".to_string(),
+            Style::default()
+                .fg(theme.title_value)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            "  :session   open sessions list".to_string(),
+            Style::default().fg(theme.text),
+        ),
+        Line::styled(
+            "  :models    switch model".to_string(),
+            Style::default().fg(theme.text),
+        ),
+        Line::styled(
+            "  :theme     switch theme".to_string(),
+            Style::default().fg(theme.text),
+        ),
+        Line::styled(
+            "  Ctrl+P     open command palette".to_string(),
+            Style::default().fg(theme.text),
+        ),
+    ];
+    let hero = Paragraph::new(hero_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Line::from(vec![Span::styled(
+                    "Welcome",
+                    Style::default()
+                        .fg(theme.title_label)
+                        .add_modifier(Modifier::BOLD),
+                )]))
+                .style(Style::default().bg(theme.highlight_low).fg(theme.text))
+                .border_style(Style::default().fg(theme.border_active)),
+        )
+        .style(Style::default().bg(theme.highlight_low).fg(theme.text))
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(hero, landing_layout[0]);
+
+    let prompt = Paragraph::new(app.composer_input.as_str())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Line::from(vec![
+                    Span::styled(
+                        "Start Chat",
+                        Style::default()
+                            .fg(theme.title_label)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                    Span::styled("Enter to apply", Style::default().fg(theme.title_value_alt)),
+                    Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                    Span::styled("Default:", Style::default().fg(theme.title_meta)),
+                    Span::styled(" ", Style::default().fg(theme.title_meta)),
+                    Span::styled(
+                        app.default_model.clone(),
+                        Style::default().fg(theme.title_value_alt),
+                    ),
+                ]))
+                .style(Style::default().bg(theme.surface_alt).fg(theme.text))
+                .border_style(Style::default().fg(theme.accent)),
+        )
+        .style(Style::default().bg(theme.surface_alt).fg(theme.text))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(prompt, landing_layout[2]);
+    let prompt_inner = landing_layout[2].inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let cursor_offset = app.composer_input.chars().count() as u16;
+    let cursor_x = prompt_inner.x + cursor_offset.min(prompt_inner.width.saturating_sub(1));
+    frame.set_cursor_position((cursor_x, prompt_inner.y));
+}
+
+fn render_main_panes(
+    frame: &mut ratatui::Frame<'_>,
+    app: &mut AppState,
+    transcript_area: Rect,
+    composer_area: Rect,
+    theme: ThemePalette,
+) {
+    let transcript_active = app.mode == InputMode::Normal;
+    let composer_active = app.mode == InputMode::Insert;
+    let transcript_inner = transcript_area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    app.transcript_view_width = transcript_inner.width.max(1) as usize;
+    app.transcript_view_height = transcript_inner.height.max(1) as usize;
+    let transcript_render = transcript_lines(
+        &app.messages,
+        app.is_busy(),
+        theme,
+        app.transcript_view_width,
+    );
+    app.transcript_assistant_markers = transcript_render.assistant_markers;
+    let conversation_title = conversation_header_title(app);
+    let mut transcript_title_spans = vec![Span::styled(
+        conversation_title,
+        Style::default()
+            .fg(theme.title_label)
+            .add_modifier(Modifier::BOLD),
+    )];
+    transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
+    transcript_title_spans.push(Span::styled(
+        transcript_position_label(app.transcript_scroll, app.transcript_max_scroll),
+        Style::default().fg(theme.title_meta),
+    ));
+    if !app.transcript_follow && app.transcript_scroll > 0 {
+        transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
+        transcript_title_spans.push(Span::styled("↑ older", Style::default().fg(theme.muted)));
+    }
+    if !app.transcript_follow && app.transcript_scroll < app.transcript_max_scroll {
+        transcript_title_spans.push(Span::styled(" | ", Style::default().fg(theme.title_meta)));
+        transcript_title_spans.push(Span::styled("↓ new", Style::default().fg(theme.success)));
+    }
+    let transcript_base = Paragraph::new(transcript_render.lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Line::from(transcript_title_spans))
+                .style(Style::default().bg(theme.highlight_low).fg(theme.text))
+                .border_style(Style::default().fg(if transcript_active {
+                    theme.border_active
+                } else {
+                    theme.border
+                })),
+        )
+        .style(Style::default().bg(theme.highlight_low).fg(theme.text))
+        .wrap(Wrap { trim: false });
+    let total_lines = transcript_base.line_count(app.transcript_view_width as u16);
+    let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
+    app.transcript_max_scroll = max_scroll;
+    if app.transcript_follow || app.transcript_scroll > max_scroll {
+        app.transcript_scroll = max_scroll;
+    }
+    let transcript = transcript_base.scroll((app.transcript_scroll, 0));
+    frame.render_widget(transcript, transcript_area);
+
+    let composer = Paragraph::new(app.composer_input.as_str())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Line::from(vec![
+                    Span::styled(
+                        "Chat",
+                        Style::default()
+                            .fg(theme.title_label)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" | ", Style::default().fg(theme.title_meta)),
+                    Span::styled(
+                        format!("[{}]", app.model),
+                        Style::default()
+                            .fg(theme.title_value_alt)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]))
+                .style(Style::default().bg(theme.surface_alt).fg(theme.text))
+                .border_style(Style::default().fg(if composer_active {
+                    theme.accent
+                } else {
+                    theme.border
+                })),
+        )
+        .style(Style::default().bg(theme.surface_alt).fg(theme.text))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(composer, composer_area);
+    if app.mode == InputMode::Insert {
+        let composer_inner = composer_area.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        let cursor_offset = app.composer_input.chars().count() as u16;
+        let cursor_x = composer_inner.x + cursor_offset.min(composer_inner.width.saturating_sub(1));
+        frame.set_cursor_position((cursor_x, composer_inner.y));
+    }
+}
+
+fn mode_label(mode: InputMode) -> &'static str {
+    match mode {
+        InputMode::Landing => "LANDING",
+        InputMode::Normal => "NORMAL",
+        InputMode::Insert => "INSERT",
+        InputMode::CommandPalette => "COMMAND",
+        InputMode::SessionManager => "SESSIONS",
+        InputMode::SessionRename => "RENAME",
+        InputMode::ConfirmDelete => "CONFIRM",
+        InputMode::ModelSelect => "MODELS",
+        InputMode::ThemeSelect => "THEMES",
+        InputMode::Help => "HELP",
+    }
+}
+
+fn footer_help_for_mode(mode: InputMode, is_busy: bool) -> &'static str {
+    match mode {
+        InputMode::Landing => "Type message | Enter send | Ctrl+P/: cmd | ?: help",
+        InputMode::Normal => {
+            if is_busy {
+                "[/] assistant jump | i compose (disabled) | : cmd | ?: help | Esc cancel stream"
+            } else {
+                "[/] assistant jump | i compose | : cmd | ?: help"
+            }
+        }
+        InputMode::Insert => "Enter: send | Backspace: edit | Esc: normal",
+        InputMode::CommandPalette => "Type command | j/k pick | Enter run | Esc cancel",
+        InputMode::SessionManager => {
+            "j/k move | Enter switch | n new | r rename | d delete | Esc close"
+        }
+        InputMode::SessionRename => "Type title | Enter save | Esc cancel",
+        InputMode::ConfirmDelete => "Confirm delete: Enter/y=yes, n/Esc=no",
+        InputMode::ModelSelect => "Model picker: j/k move | Enter select | Esc cancel",
+        InputMode::ThemeSelect => "Theme picker: j/k move | Enter select | Esc cancel",
+        InputMode::Help => "Help: Esc/q/? close",
+    }
+}
+
+fn render_footer(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Rect, theme: ThemePalette) {
+    let footer_help = footer_help_for_mode(app.mode, app.is_busy());
+    let footer_width = area.width as usize;
+    let compact_help = if footer_width < 80 {
+        compact_footer_help(app.mode, app.is_busy())
+    } else {
+        footer_help.to_string()
+    };
+    let mode_chip = mode_label(app.mode).to_string();
+    let status_text = if app.status_message.trim().is_empty() {
+        "Ready.".to_string()
+    } else {
+        app.status_message.clone()
+    };
+    let mut footer_spans = vec![Span::styled(
+        format!("[{mode_chip}] "),
+        Style::default()
+            .bg(theme.surface_alt)
+            .fg(status_mode_color(app.mode, theme))
+            .add_modifier(Modifier::BOLD),
+    )];
+    footer_spans.push(Span::styled(compact_help, Style::default().fg(theme.text)));
+    footer_spans.push(Span::styled(
+        " | ",
+        Style::default().fg(theme.highlight_mid),
+    ));
+    footer_spans.push(Span::styled(status_text, Style::default().fg(theme.text)));
+    let footer = Paragraph::new(Line::from(footer_spans))
+        .style(Style::default().bg(theme.surface_alt).fg(theme.text));
+    frame.render_widget(footer, area);
+}
+
+fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: ThemePalette) {
+    if app.mode == InputMode::CommandPalette {
+        let popup = centered_rect(70, 12, frame.area());
+        let mut rows: Vec<Line<'_>> = Vec::new();
+        rows.push(Line::from(vec![
+            Span::styled(":", Style::default().fg(theme.title_meta)),
+            Span::styled(
+                app.command_input.clone(),
+                Style::default().fg(theme.title_value_alt),
+            ),
+        ]));
+        rows.push(Line::raw(""));
+        rows.push(Line::styled(
+            "Commands (j/k or arrows to select, Enter to run):".to_string(),
+            Style::default()
+                .fg(theme.title_label)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let suggestions = palette_suggestions(&app.command_input);
+        if suggestions.is_empty() {
+            rows.push(Line::styled(
+                "  (no matching commands)".to_string(),
+                Style::default().fg(theme.muted),
+            ));
+        } else {
+            let selected = app
+                .command_selected_index
+                .min(suggestions.len().saturating_sub(1));
+            for (idx, item) in suggestions.iter().enumerate() {
+                let marker = if idx == selected { ">" } else { " " };
+                if idx == selected {
+                    let selected_fg = contrast_text_for_bg(theme.success, theme);
+                    rows.push(Line::from(vec![
+                        Span::styled(
+                            marker.to_string(),
+                            Style::default()
+                                .fg(theme.modal_selected_bg)
+                                .bg(theme.success)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            " ".to_string(),
+                            Style::default().fg(selected_fg).bg(theme.success),
+                        ),
+                        Span::styled(
+                            item.to_string(),
+                            Style::default()
+                                .fg(selected_fg)
+                                .bg(theme.success)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                } else {
+                    let item_color = if *item == "quit" {
+                        theme.warn
+                    } else {
+                        theme.text
+                    };
+                    rows.push(Line::from(vec![
+                        Span::styled(marker.to_string(), Style::default().fg(theme.muted)),
+                        Span::raw(" "),
+                        Span::styled(item.to_string(), Style::default().fg(item_color)),
+                    ]));
+                }
+            }
+        }
+        let command = Paragraph::new(rows)
+            .block(modal_block(theme, "Command"))
+            .style(Style::default().bg(theme.modal_bg).fg(theme.text))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(Clear, popup);
+        frame.render_widget(command, popup);
+    } else if app.mode == InputMode::SessionManager || app.mode == InputMode::SessionRename {
+        let popup = centered_rect(90, 18, frame.area());
+        let rows = session_manager_rows(app, popup.height as usize);
+        let lines = modal_lines_from_rows(&rows, theme);
+        let session_modal = Paragraph::new(lines)
+            .block(modal_block(theme, "Sessions"))
+            .style(Style::default().bg(theme.modal_bg).fg(theme.text))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(Clear, popup);
+        frame.render_widget(session_modal, popup);
+
+        if app.mode == InputMode::SessionRename {
+            let inner = popup.inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            let cursor_offset = app.session_rename_input.chars().count() as u16;
+            let cursor_x = inner.x + (9 + cursor_offset).min(inner.width.saturating_sub(1));
+            let cursor_y = inner.y + 2;
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
+    } else if app.mode == InputMode::ConfirmDelete {
+        let popup = centered_rect(60, 5, frame.area());
+        let target = app
+            .pending_delete_session_id
+            .map(|id| format!("#{id}"))
+            .unwrap_or_else(|| "selected session".to_string());
+        let confirm_lines = vec![
+            Line::styled(
+                format!("Delete session {target}?"),
+                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                "This cannot be undone.".to_string(),
+                Style::default().fg(theme.error),
+            ),
+            Line::styled(
+                "[Y/n]".to_string(),
+                Style::default()
+                    .fg(theme.title_label)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        let confirm = Paragraph::new(confirm_lines)
+            .block(modal_block(theme, "Confirm Delete"))
+            .style(Style::default().bg(theme.modal_bg).fg(theme.text))
+            .alignment(Alignment::Left);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(confirm, popup);
+    } else if app.mode == InputMode::ModelSelect {
+        let popup = centered_rect(70, 12, frame.area());
+        let mut rows = Vec::new();
+        if app.model_loading {
+            rows.push("Loading models from Ollama...".to_string());
+        } else if let Some(error) = app.model_error.as_deref() {
+            rows.push(format!("Failed to load models: {error}"));
+        } else if app.model_options.is_empty() {
+            rows.push("No models available from /api/tags".to_string());
+        } else {
+            rows.push("Select a model (Enter to apply):".to_string());
+            rows.push(String::new());
+            for (idx, model) in app.model_options.iter().enumerate() {
+                let marker = if idx == app.model_selected_index {
+                    ">"
+                } else {
+                    " "
+                };
+                let active = if *model == app.model { "*" } else { " " };
+                rows.push(format!("{marker}{active} {model}"));
+            }
+        }
+
+        let lines = modal_lines_from_rows(&rows, theme);
+        let picker = Paragraph::new(lines)
+            .block(modal_block(theme, "Models"))
+            .style(Style::default().bg(theme.modal_bg).fg(theme.text))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(Clear, popup);
+        frame.render_widget(picker, popup);
+    } else if app.mode == InputMode::ThemeSelect {
+        let popup = centered_rect(70, 12, frame.area());
+        let mut rows = Vec::new();
+        if app.theme_options.is_empty() {
+            rows.push("No themes found in config/themes".to_string());
+            rows.push("Add *.toml files under ~/.config/rosie/themes".to_string());
+        } else {
+            rows.push("Select a theme (Enter to apply):".to_string());
+            rows.push(String::new());
+            for (idx, theme_name) in app.theme_options.iter().enumerate() {
+                let marker = if idx == app.theme_selected_index {
+                    ">"
+                } else {
+                    " "
+                };
+                let active = if *theme_name == app.theme_key {
+                    "*"
+                } else {
+                    " "
+                };
+                rows.push(format!("{marker}{active} {theme_name}"));
+            }
+        }
+        let lines = modal_lines_from_rows(&rows, theme);
+        let picker = Paragraph::new(lines)
+            .block(modal_block(theme, "Themes"))
+            .style(Style::default().bg(theme.modal_bg).fg(theme.text))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(Clear, popup);
+        frame.render_widget(picker, popup);
+    } else if app.mode == InputMode::Help {
+        let popup = centered_rect(78, 16, frame.area());
+        let lines = help_lines(theme);
+        let help = Paragraph::new(lines)
+            .block(modal_block(theme, "Help"))
+            .style(Style::default().bg(theme.modal_bg).fg(theme.text))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(Clear, popup);
+        frame.render_widget(help, popup);
+    }
 }
 
 fn submit_composer_message(app: &mut AppState) {
@@ -2405,7 +2482,7 @@ fn help_rows() -> Vec<String> {
         "  i: enter insert mode, Enter: send, Esc: return to normal".to_string(),
         "".to_string(),
         "Commands".to_string(),
-        "  :session  :models  :theme  :help  :quit".to_string(),
+        command_shortcuts_line(),
         "  :theme <name> sets directly; :theme opens picker".to_string(),
         "  ':' palette shows a picklist; use j/k (or arrows) + Enter".to_string(),
         "  :help or ? opens this panel".to_string(),
@@ -2629,7 +2706,30 @@ fn color_to_rgb(color: Color) -> (u8, u8, u8) {
     }
 }
 
-const PALETTE_COMMANDS: &[&str] = &["help", "session", "models", "theme", "quit"];
+const PALETTE_COMMANDS: [&str; 5] = ["help", "session", "models", "theme", "quit"];
+const CMD_HELP: usize = 0;
+const CMD_SESSION: usize = 1;
+const CMD_MODELS: usize = 2;
+const CMD_THEME: usize = 3;
+const CMD_QUIT: usize = 4;
+
+fn command_shortcuts_line() -> String {
+    format!(
+        "  {}",
+        PALETTE_COMMANDS
+            .iter()
+            .map(|name| format!(":{name}"))
+            .collect::<Vec<_>>()
+            .join("  ")
+    )
+}
+
+fn parse_palette_command(stem: &str) -> Option<usize> {
+    if stem == "q" {
+        return Some(CMD_QUIT);
+    }
+    PALETTE_COMMANDS.iter().position(|name| *name == stem)
+}
 
 fn palette_suggestions(input: &str) -> Vec<&'static str> {
     let trimmed = input
@@ -2692,7 +2792,7 @@ fn run_palette_selected_command(app: &mut AppState) -> bool {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    let is_exact = PALETTE_COMMANDS.iter().any(|item| *item == stem);
+    let is_exact = parse_palette_command(&stem).is_some();
 
     if !has_args && !is_exact {
         app.command_input = selected.to_string();
@@ -2704,6 +2804,18 @@ fn run_palette_selected_command(app: &mut AppState) -> bool {
 struct TranscriptRender {
     lines: Vec<Line<'static>>,
     assistant_markers: Vec<u16>,
+}
+
+struct MessageRenderCtx<'a> {
+    label: &'a str,
+    label_color: Color,
+    is_assistant: bool,
+    wrap_pad: &'a str,
+    text_style: Style,
+    code_style: Style,
+    rail_style: Style,
+    gutter_style: Style,
+    theme: ThemePalette,
 }
 
 fn transcript_lines(
@@ -2730,51 +2842,28 @@ fn transcript_lines(
             "assistant" => ("Assistant", theme.assistant),
             _ => ("System", theme.system),
         };
-        let wrap_pad = "  ";
         let is_assistant = message.role == "assistant";
-        let code_style = Style::default().fg(theme.text).bg(theme.surface_alt);
-        let rail_style = Style::default()
-            .fg(theme.title_meta)
-            .bg(theme.highlight_low);
-        let gutter_style = Style::default()
-            .fg(theme.title_value_alt)
-            .bg(theme.surface_alt);
-
-        if is_assistant {
-            rows.push(Line::raw(""));
-            assistant_markers.push(rows.len() as u16);
-            rows.push(Line::from(vec![
-                Span::styled(
-                    "──────────────── ".to_string(),
-                    Style::default().fg(theme.title_meta),
-                ),
-                Span::styled("🤖 ".to_string(), Style::default().fg(theme.title_label)),
-                Span::styled(
-                    "Rosie".to_string(),
-                    Style::default()
-                        .fg(theme.title_label)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    " ────────────────".to_string(),
-                    Style::default().fg(theme.title_meta),
-                ),
-            ]));
-            rows.push(Line::raw(""));
-        }
-
-        let is_pending_assistant = is_busy
-            && is_assistant
-            && idx + 1 == messages.len()
-            && message.content.trim().is_empty();
-        let content = if is_pending_assistant {
-            "[waiting for model response...]".to_string()
-        } else if message.content.is_empty() {
-            String::new()
-        } else {
-            message.content.clone()
+        let ctx = MessageRenderCtx {
+            label,
+            label_color,
+            is_assistant,
+            wrap_pad: "  ",
+            text_style: Style::default().fg(theme.text),
+            code_style: Style::default().fg(theme.text).bg(theme.surface_alt),
+            rail_style: Style::default()
+                .fg(theme.title_meta)
+                .bg(theme.highlight_low),
+            gutter_style: Style::default()
+                .fg(theme.title_value_alt)
+                .bg(theme.surface_alt),
+            theme,
         };
 
+        if ctx.is_assistant {
+            push_assistant_separator(&mut rows, &mut assistant_markers, theme);
+        }
+
+        let content = message_content_for_render(message, is_busy, idx, messages.len());
         let mut in_code_block = false;
         let mut code_highlighter: Option<HighlightLines<'static>> = None;
         let mut code_lines: Vec<String> = Vec::new();
@@ -2792,8 +2881,8 @@ fn transcript_lines(
                         format!("code: {lang}")
                     };
                     rows.push(Line::from(vec![
-                        Span::styled("  ╭─ ".to_string(), rail_style),
-                        Span::styled(code_label, rail_style.add_modifier(Modifier::BOLD)),
+                        Span::styled("  ╭─ ".to_string(), ctx.rail_style),
+                        Span::styled(code_label, ctx.rail_style.add_modifier(Modifier::BOLD)),
                     ]));
                     code_highlighter = build_code_highlighter(
                         if lang.is_empty() { None } else { Some(lang) },
@@ -2803,40 +2892,13 @@ fn transcript_lines(
                     in_code_block = true;
                     wrote_any = true;
                 } else {
-                    let block_width = code_lines
-                        .iter()
-                        .map(|l| l.chars().count())
-                        .max()
-                        .unwrap_or(0);
-                    for (line_idx, code_line) in code_lines.iter().enumerate() {
-                        let mut spans: Vec<Span<'static>> = Vec::new();
-                        if !is_assistant && !wrote_first_content_line && line_idx == 0 {
-                            spans.push(Span::styled(
-                                format!("{label}:"),
-                                Style::default()
-                                    .fg(label_color)
-                                    .add_modifier(Modifier::BOLD),
-                            ));
-                        } else if !is_assistant {
-                            spans.push(Span::styled(
-                                wrap_pad.to_string(),
-                                Style::default().fg(theme.text),
-                            ));
-                        }
-                        spans.push(Span::styled("  │ ".to_string(), gutter_style));
-                        spans.extend(highlighted_code_spans(
-                            code_line,
-                            &mut code_highlighter,
-                            code_style,
-                        ));
-                        let pad = block_width.saturating_sub(code_line.chars().count());
-                        if pad > 0 {
-                            spans.push(Span::styled(" ".repeat(pad), code_style));
-                        }
-                        rows.push(Line::from(spans));
-                        wrote_first_content_line = true;
-                    }
-                    rows.push(Line::styled("  ╰────────────────".to_string(), rail_style));
+                    flush_code_block(
+                        &mut rows,
+                        &code_lines,
+                        &mut code_highlighter,
+                        &mut wrote_first_content_line,
+                        &ctx,
+                    );
                     code_lines.clear();
                     code_highlighter = None;
                     in_code_block = false;
@@ -2851,75 +2913,32 @@ fn transcript_lines(
                 continue;
             }
 
-            if is_assistant {
-                rows.push(Line::from(markdown_line_spans(line, theme)));
+            if ctx.is_assistant {
+                rows.push(Line::from(markdown_line_spans(line, ctx.theme)));
                 wrote_first_content_line = true;
                 wrote_any = true;
                 continue;
             }
 
-            if !wrote_first_content_line {
-                rows.push(Line::from(vec![
-                    Span::styled(
-                        format!("{label}:"),
-                        Style::default()
-                            .fg(label_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!(" {line}"), Style::default().fg(theme.text)),
-                ]));
-                wrote_first_content_line = true;
-            } else {
-                rows.push(Line::styled(
-                    format!("{wrap_pad}{line}"),
-                    Style::default().fg(theme.text),
-                ));
-            }
+            push_non_assistant_text_line(&mut rows, line, &mut wrote_first_content_line, &ctx);
             wrote_any = true;
         }
 
         if in_code_block {
-            let block_width = code_lines
-                .iter()
-                .map(|l| l.chars().count())
-                .max()
-                .unwrap_or(0);
-            for (line_idx, code_line) in code_lines.iter().enumerate() {
-                let mut spans: Vec<Span<'static>> = Vec::new();
-                if !is_assistant && !wrote_first_content_line && line_idx == 0 {
-                    spans.push(Span::styled(
-                        format!("{label}:"),
-                        Style::default()
-                            .fg(label_color)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                } else if !is_assistant {
-                    spans.push(Span::styled(
-                        wrap_pad.to_string(),
-                        Style::default().fg(theme.text),
-                    ));
-                }
-                spans.push(Span::styled("  │ ".to_string(), gutter_style));
-                spans.extend(highlighted_code_spans(
-                    code_line,
-                    &mut code_highlighter,
-                    code_style,
-                ));
-                let pad = block_width.saturating_sub(code_line.chars().count());
-                if pad > 0 {
-                    spans.push(Span::styled(" ".repeat(pad), code_style));
-                }
-                rows.push(Line::from(spans));
-                wrote_first_content_line = true;
-            }
-            rows.push(Line::styled("  ╰────────────────".to_string(), rail_style));
+            flush_code_block(
+                &mut rows,
+                &code_lines,
+                &mut code_highlighter,
+                &mut wrote_first_content_line,
+                &ctx,
+            );
         }
 
-        if !wrote_any && !is_assistant {
+        if !wrote_any && !ctx.is_assistant {
             rows.push(Line::styled(
-                format!("{label}:"),
+                format!("{}:", ctx.label),
                 Style::default()
-                    .fg(label_color)
+                    .fg(ctx.label_color)
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -2928,6 +2947,119 @@ fn transcript_lines(
     TranscriptRender {
         lines: rows,
         assistant_markers,
+    }
+}
+
+fn push_assistant_separator(
+    rows: &mut Vec<Line<'static>>,
+    assistant_markers: &mut Vec<u16>,
+    theme: ThemePalette,
+) {
+    rows.push(Line::raw(""));
+    assistant_markers.push(rows.len() as u16);
+    rows.push(Line::from(vec![
+        Span::styled(
+            "──────────────── ".to_string(),
+            Style::default().fg(theme.title_meta),
+        ),
+        Span::styled("🤖 ".to_string(), Style::default().fg(theme.title_label)),
+        Span::styled(
+            "Rosie".to_string(),
+            Style::default()
+                .fg(theme.title_label)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " ────────────────".to_string(),
+            Style::default().fg(theme.title_meta),
+        ),
+    ]));
+    rows.push(Line::raw(""));
+}
+
+fn message_content_for_render(
+    message: &ChatMessage,
+    is_busy: bool,
+    idx: usize,
+    total_messages: usize,
+) -> String {
+    let is_assistant = message.role == "assistant";
+    let is_pending_assistant =
+        is_busy && is_assistant && idx + 1 == total_messages && message.content.trim().is_empty();
+    if is_pending_assistant {
+        "[waiting for model response...]".to_string()
+    } else if message.content.is_empty() {
+        String::new()
+    } else {
+        message.content.clone()
+    }
+}
+
+fn flush_code_block(
+    rows: &mut Vec<Line<'static>>,
+    code_lines: &[String],
+    code_highlighter: &mut Option<HighlightLines<'static>>,
+    wrote_first_content_line: &mut bool,
+    ctx: &MessageRenderCtx<'_>,
+) {
+    let block_width = code_lines
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (line_idx, code_line) in code_lines.iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if !ctx.is_assistant && !*wrote_first_content_line && line_idx == 0 {
+            spans.push(Span::styled(
+                format!("{}:", ctx.label),
+                Style::default()
+                    .fg(ctx.label_color)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else if !ctx.is_assistant {
+            spans.push(Span::styled(ctx.wrap_pad.to_string(), ctx.text_style));
+        }
+        spans.push(Span::styled("  │ ".to_string(), ctx.gutter_style));
+        spans.extend(highlighted_code_spans(
+            code_line,
+            code_highlighter,
+            ctx.code_style,
+        ));
+        let pad = block_width.saturating_sub(code_line.chars().count());
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), ctx.code_style));
+        }
+        rows.push(Line::from(spans));
+        *wrote_first_content_line = true;
+    }
+    rows.push(Line::styled(
+        "  ╰────────────────".to_string(),
+        ctx.rail_style,
+    ));
+}
+
+fn push_non_assistant_text_line(
+    rows: &mut Vec<Line<'static>>,
+    line: &str,
+    wrote_first_content_line: &mut bool,
+    ctx: &MessageRenderCtx<'_>,
+) {
+    if !*wrote_first_content_line {
+        rows.push(Line::from(vec![
+            Span::styled(
+                format!("{}:", ctx.label),
+                Style::default()
+                    .fg(ctx.label_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" {line}"), ctx.text_style),
+        ]));
+        *wrote_first_content_line = true;
+    } else {
+        rows.push(Line::styled(
+            format!("{}{}", ctx.wrap_pad, line),
+            ctx.text_style,
+        ));
     }
 }
 fn syntax_assets() -> &'static (SyntaxSet, ThemeSet) {
@@ -3536,33 +3668,35 @@ fn run_palette_command(app: &mut AppState) -> bool {
     app.command_input.clear();
     app.mode = InputMode::Normal;
 
-    match command.as_str() {
-        "" => {
+    let Some(command_idx) = parse_palette_command(&command) else {
+        if command.is_empty() {
             app.status_message = "No command entered.".to_string();
-            false
+        } else {
+            app.status_message = format!("Unknown command: :{command}");
         }
-        "quit" | "q" => true,
-        "session" => {
+        return false;
+    };
+
+    match command_idx {
+        CMD_QUIT => true,
+        CMD_SESSION => {
             open_session_manager(app);
             false
         }
-        "models" => {
+        CMD_MODELS => {
             open_model_picker(app);
             false
         }
-        "help" => {
+        CMD_HELP => {
             app.mode = InputMode::Help;
             app.status_message = "Help open.".to_string();
             false
         }
-        "theme" => {
+        CMD_THEME => {
             apply_theme_command(app, arg);
             false
         }
-        _ => {
-            app.status_message = format!("Unknown command: :{command}");
-            false
-        }
+        _ => false,
     }
 }
 
@@ -3678,6 +3812,20 @@ mod tests {
             sessions,
             selected_session_index,
         })
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn render_lines_text(messages: Vec<ChatMessage>, is_busy: bool) -> (Vec<String>, Vec<u16>) {
+        let theme = default_theme().palette;
+        let render = transcript_lines(&messages, is_busy, theme, 80);
+        let lines = render.lines.iter().map(line_text).collect::<Vec<_>>();
+        (lines, render.assistant_markers)
     }
 
     #[test]
@@ -4039,5 +4187,79 @@ mod tests {
         }
 
         let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn transcript_marks_assistant_separator_and_marker() {
+        let messages = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "world".to_string(),
+            },
+        ];
+        let (lines, markers) = render_lines_text(messages, false);
+        assert_eq!(markers.len(), 1);
+        let marker_idx = markers[0] as usize;
+        assert!(marker_idx < lines.len());
+        assert!(lines[marker_idx].contains("🤖 "));
+        assert!(lines[marker_idx].contains("Rosie"));
+    }
+
+    #[test]
+    fn transcript_code_block_has_frame_and_padded_width() {
+        let messages = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: "```rs\nlet value = 10;\nx\n```".to_string(),
+        }];
+        let (lines, _) = render_lines_text(messages, false);
+        let start_idx = lines
+            .iter()
+            .position(|line| line.starts_with("  ╭─ code: rs"))
+            .expect("code block start line");
+        assert!(lines.iter().any(|line| line.starts_with("  ╰")));
+
+        let body = lines
+            .iter()
+            .skip(start_idx + 1)
+            .take_while(|line| !line.starts_with("  ╰"))
+            .filter(|line| line.starts_with("  │ "))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(body.len(), 2);
+        assert_eq!(body[0].chars().count(), body[1].chars().count());
+    }
+
+    #[test]
+    fn transcript_user_prefix_only_on_first_non_assistant_line() {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "alpha\nbeta".to_string(),
+        }];
+        let (lines, _) = render_lines_text(messages, false);
+        assert!(lines.iter().any(|line| line == "You: alpha"));
+        assert!(lines.iter().any(|line| line == "  beta"));
+        let prefixed = lines.iter().filter(|line| line.starts_with("You:")).count();
+        assert_eq!(prefixed, 1);
+    }
+
+    #[test]
+    fn transcript_assistant_markdown_line_invariants() {
+        let messages = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: "## Heading\n- item\n> quote\n---".to_string(),
+        }];
+        let (lines, _) = render_lines_text(messages, false);
+        assert!(lines.iter().any(|line| line == "## Heading"));
+        assert!(lines.iter().any(|line| line == "• item"));
+        assert!(lines.iter().any(|line| line == "▎ quote"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "────────────────────────────────")
+        );
     }
 }
