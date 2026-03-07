@@ -1,4 +1,4 @@
-use crate::theme::{ThemeName, ThemePalette};
+use crate::theme::{ThemePalette, config_dir_from_env, discover_file_theme_names, resolve_theme};
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -23,14 +23,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-pub fn run(host: &str, model: &str, theme_name: ThemeName, db_path: &Path) -> Result<()> {
+pub fn run(
+    host: &str,
+    model: &str,
+    theme_key: &str,
+    theme: ThemePalette,
+    db_path: &Path,
+) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, host, model, theme_name, db_path);
+    let result = run_loop(&mut terminal, host, model, theme_key, theme, db_path);
     let cleanup_result = cleanup_terminal(&mut terminal);
 
     result.and(cleanup_result)
@@ -67,6 +73,7 @@ struct AppState {
     delete_return_to_session_manager: bool,
     session_rename_input: String,
     status_message: String,
+    theme_key: String,
     theme: ThemePalette,
 }
 
@@ -75,6 +82,7 @@ impl AppState {
         host: &str,
         model: &str,
         default_model: &str,
+        theme_key: &str,
         theme: ThemePalette,
         store: SessionStore,
         active_session_id: i64,
@@ -116,6 +124,7 @@ impl AppState {
                 "Loaded session #{}. Press i to enter Insert mode.",
                 active_session_id
             ),
+            theme_key: theme_key.to_string(),
             theme,
         }
     }
@@ -404,7 +413,8 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     host: &str,
     model: &str,
-    theme_name: ThemeName,
+    theme_key: &str,
+    theme: ThemePalette,
     db_path: &Path,
 ) -> Result<()> {
     let store = SessionStore::open(db_path)?;
@@ -415,11 +425,11 @@ fn run_loop(
         .iter()
         .position(|item| item.id == session.session_id)
         .unwrap_or(0);
-    let theme = theme_name.palette();
     let mut app = AppState::new(
         host,
         &active_model,
         model,
+        theme_key,
         theme,
         store,
         session.session_id,
@@ -469,7 +479,7 @@ fn run_loop(
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!("Status | Theme: {}", theme.name.as_str()))
+                    .title(format!("Status | Theme: {}", app.theme_key))
                     .style(Style::default().bg(theme.surface).fg(theme.text))
                     .border_style(Style::default().fg(theme.border_active)),
             )
@@ -2309,33 +2319,59 @@ fn run_palette_command(app: &mut AppState) -> bool {
 
 fn apply_theme_command(app: &mut AppState, arg: &str) {
     if arg.is_empty() {
+        let config_dir = match config_dir_from_env() {
+            Ok(path) => path,
+            Err(err) => {
+                app.status_message = format!(
+                    "Active theme: {} (failed to inspect custom themes: {err})",
+                    app.theme_key
+                );
+                return;
+            }
+        };
+        let mut options = vec!["catppuccin".to_string(), "rose-pine".to_string()];
+        options.extend(discover_file_theme_names(&config_dir));
+        options.sort();
+        options.dedup();
         app.status_message = format!(
-            "Active theme: {} (options: catppuccin, rose-pine)",
-            app.theme.name.as_str()
+            "Active theme: {} (available: {})",
+            app.theme_key,
+            options.join(", ")
         );
         return;
     }
 
-    let Some(theme_name) = ThemeName::from_config(Some(arg)) else {
-        app.status_message = format!("Invalid theme '{arg}'. Use catppuccin or rose-pine.");
-        return;
+    let config_dir = match config_dir_from_env() {
+        Ok(path) => path,
+        Err(err) => {
+            app.status_message = format!("Unable to resolve theme config directory: {err}");
+            return;
+        }
+    };
+    let resolved = match resolve_theme(arg, &config_dir) {
+        Ok(theme) => theme,
+        Err(err) => {
+            app.status_message = format!("Failed to load theme '{arg}': {err}");
+            return;
+        }
     };
 
-    app.theme = theme_name.palette();
-    match persist_theme_config(theme_name) {
+    app.theme = resolved.palette;
+    app.theme_key = resolved.key.clone();
+    match persist_theme_config(&resolved.key) {
         Ok(()) => {
-            app.status_message = format!("Theme set to {}.", theme_name.as_str());
+            app.status_message = format!("Theme set to {}.", resolved.key);
         }
         Err(err) => {
             app.status_message = format!(
                 "Theme set to {}, but failed to persist: {err}",
-                theme_name.as_str()
+                resolved.key
             );
         }
     }
 }
 
-fn persist_theme_config(theme_name: ThemeName) -> Result<()> {
+fn persist_theme_config(theme_key: &str) -> Result<()> {
     let path = tui_config_path()?;
     let mut value = match fs::read_to_string(&path) {
         Ok(contents) => toml::from_str::<toml::Value>(&contents)
@@ -2351,7 +2387,7 @@ fn persist_theme_config(theme_name: ThemeName) -> Result<()> {
         .ok_or_else(|| anyhow!("Config file root must be a TOML table"))?;
     table.insert(
         "theme".to_string(),
-        toml::Value::String(theme_name.as_str().to_string()),
+        toml::Value::String(theme_key.to_string()),
     );
 
     if let Some(parent) = path.parent() {
@@ -2372,6 +2408,7 @@ fn tui_config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::ThemeName;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2401,6 +2438,7 @@ mod tests {
             "http://localhost:11434",
             "test-model",
             "test-model",
+            "catppuccin",
             ThemeName::Catppuccin.palette(),
             store,
             active_session_id,
@@ -2559,11 +2597,11 @@ mod tests {
 
             app.command_input = ":theme rose-pine".to_string();
             assert!(!run_palette_command(&mut app));
-            assert_eq!(app.theme.name, ThemeName::RosePine);
+            assert_eq!(app.theme_key, "rose-pine");
 
             app.command_input = ":theme catppuccin".to_string();
             assert!(!run_palette_command(&mut app));
-            assert_eq!(app.theme.name, ThemeName::Catppuccin);
+            assert_eq!(app.theme_key, "catppuccin");
         }
 
         let _ = fs::remove_file(&db_path);

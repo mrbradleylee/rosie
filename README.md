@@ -127,6 +127,7 @@ That command creates/updates config and prompts for:
 - `execution_enabled` (controls whether execute is allowed in `--cmd`)
 
 Theme is controlled in TUI with `:theme` and persisted into config as `theme`.
+`theme` accepts either a built-in (`catppuccin`, `rose-pine`) or a file theme name loaded from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`).
 
 Example config:
 
@@ -137,6 +138,25 @@ ask_model = "llama3.2"
 cmd_model = "qwen2.5-coder"
 theme = "rose-pine"
 execution_enabled = true
+```
+
+Theme file schema:
+
+```toml
+name = "my-theme"
+
+[colors]
+base = "#191724"
+surface = "#1f1d2e"
+surface_alt = "#26233a"
+text = "#e0def4"
+muted = "#908caa"
+accent = "#c4a7e7"
+success = "#9ccfd8"
+warn = "#f6c177"
+error = "#eb6f92"
+border = "#403d52"
+border_active = "#524f67"
 ```
 
 Model resolution order:

@@ -13,6 +13,7 @@
 - Changed the default theme to `rose-pine`
 - Added `:theme` palette command to view/switch themes at runtime and persist selection to config
 - Updated `--configure` to stop prompting for theme selection
+- Added file-backed theme loading from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`) using a documented `[colors]` hex schema
 
 ## 0.7.0
 

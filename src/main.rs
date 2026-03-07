@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use theme::{DEFAULT_THEME, ThemeName};
+use theme::{DEFAULT_THEME, config_dir_from_env, resolve_theme};
 use tokio::io::{self as tokio_io, AsyncReadExt};
 
 const MAN_PAGE: &str = include_str!("../man/rosie.1");
@@ -146,9 +146,21 @@ async fn launch_tui(runtime_model: Option<&str>) -> Result<()> {
     let data_dir = app_data_dir()?;
     fs::create_dir_all(&data_dir)?;
     let db_path = data_dir.join("sessions.sqlite3");
-    let theme = ThemeName::from_config(config.theme.as_deref()).unwrap_or(DEFAULT_THEME);
+    let config_dir = config_dir_from_env()?;
+    let theme_key = config
+        .theme
+        .as_deref()
+        .unwrap_or(DEFAULT_THEME.as_str())
+        .to_string();
+    let resolved_theme = resolve_theme(&theme_key, &config_dir)?;
 
-    tui::run(&host, &model, theme, &db_path)?;
+    tui::run(
+        &host,
+        &model,
+        &resolved_theme.key,
+        resolved_theme.palette,
+        &db_path,
+    )?;
     Ok(())
 }
 
@@ -994,7 +1006,10 @@ async fn configure() -> Result<()> {
             true,
         )?,
     };
-    let theme = ThemeName::from_config(existing.theme.as_deref()).unwrap_or(DEFAULT_THEME);
+    let theme = existing
+        .theme
+        .clone()
+        .unwrap_or_else(|| DEFAULT_THEME.as_str().to_string());
     let execution_enabled = prompt_bool_config_value(
         "Enable command execution for --cmd",
         existing.execution_enabled.unwrap_or(true),
@@ -1005,7 +1020,7 @@ async fn configure() -> Result<()> {
         default_model: normalize_config_value(default_model),
         ask_model: normalize_config_value(ask_model),
         cmd_model: normalize_config_value(cmd_model),
-        theme: Some(theme.as_str().to_string()),
+        theme: Some(theme),
         execution_enabled: Some(execution_enabled),
         legacy_model: None,
     };
