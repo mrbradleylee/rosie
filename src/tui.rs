@@ -35,6 +35,7 @@ pub fn run(host: &str, model: &str, db_path: &Path) -> Result<()> {
 struct AppState {
     mode: InputMode,
     host: String,
+    default_model: String,
     model: String,
     composer_input: String,
     command_input: String,
@@ -66,6 +67,7 @@ impl AppState {
     fn new(
         host: &str,
         model: &str,
+        default_model: &str,
         store: SessionStore,
         active_session_id: i64,
         messages: Vec<ChatMessage>,
@@ -75,6 +77,7 @@ impl AppState {
         Self {
             mode: InputMode::Normal,
             host: host.to_string(),
+            default_model: default_model.to_string(),
             model: model.to_string(),
             composer_input: String::new(),
             command_input: String::new(),
@@ -140,12 +143,14 @@ struct SessionStore {
 struct LoadedSession {
     session_id: i64,
     messages: Vec<ChatMessage>,
+    model: Option<String>,
 }
 
 #[derive(Clone)]
 struct SessionSummary {
     id: i64,
     title: Option<String>,
+    model: Option<String>,
     message_count: i64,
 }
 
@@ -178,6 +183,7 @@ impl SessionStore {
                 ON sessions(updated_at DESC);
             ",
         )?;
+        ensure_sessions_model_column(&conn)?;
 
         Ok(Self { conn })
     }
@@ -193,10 +199,7 @@ impl SessionStore {
             .optional()?
             .unwrap_or(self.create_session()?);
 
-        Ok(LoadedSession {
-            session_id,
-            messages: self.load_messages(session_id)?,
-        })
+        self.load_session(session_id)
     }
 
     fn create_session(&self) -> Result<i64> {
@@ -223,10 +226,28 @@ impl SessionStore {
         Ok(messages)
     }
 
+    fn load_session(&self, session_id: i64) -> Result<LoadedSession> {
+        let model = self
+            .conn
+            .query_row(
+                "SELECT model FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+
+        Ok(LoadedSession {
+            session_id,
+            messages: self.load_messages(session_id)?,
+            model,
+        })
+    }
+
     fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let mut stmt = self.conn.prepare(
             "
-            SELECT s.id, s.title, COUNT(m.id) AS message_count
+            SELECT s.id, s.title, s.model, COUNT(m.id) AS message_count
             FROM sessions s
             LEFT JOIN messages m ON m.session_id = s.id
             GROUP BY s.id
@@ -238,7 +259,8 @@ impl SessionStore {
             Ok(SessionSummary {
                 id: row.get(0)?,
                 title: row.get(1)?,
-                message_count: row.get(2)?,
+                model: row.get(2)?,
+                message_count: row.get(3)?,
             })
         })?;
 
@@ -291,6 +313,27 @@ impl SessionStore {
             .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
         Ok(())
     }
+
+    fn set_session_model(&self, session_id: i64, model: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET model = ?1, updated_at = ?2 WHERE id = ?3",
+            params![model, unix_timestamp(), session_id],
+        )?;
+        Ok(())
+    }
+}
+
+fn ensure_sessions_model_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
+    let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let has_model = cols
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "model");
+    if !has_model {
+        conn.execute("ALTER TABLE sessions ADD COLUMN model TEXT", [])?;
+    }
+    Ok(())
 }
 
 fn unix_timestamp() -> i64 {
@@ -330,6 +373,7 @@ fn run_loop(
 ) -> Result<()> {
     let store = SessionStore::open(db_path)?;
     let session = store.load_or_create_active_session()?;
+    let active_model = session.model.clone().unwrap_or_else(|| model.to_string());
     let sessions = store.list_sessions()?;
     let selected_session_index = sessions
         .iter()
@@ -337,6 +381,7 @@ fn run_loop(
         .unwrap_or(0);
     let mut app = AppState::new(
         host,
+        &active_model,
         model,
         store,
         session.session_id,
@@ -1017,9 +1062,14 @@ fn session_rows(app: &AppState) -> Vec<String> {
             .as_deref()
             .map(str::to_string)
             .unwrap_or_else(|| format!("Session #{}", session.id));
+        let model_suffix = session
+            .model
+            .as_deref()
+            .map(|value| format!(" [{value}]"))
+            .unwrap_or_default();
         rows.push(format!(
-            "{selected_marker}{active_marker} {label} ({})",
-            session.message_count
+            "{selected_marker}{active_marker} {label}{model_suffix} ({})",
+            session.message_count,
         ));
     }
     rows
@@ -1103,10 +1153,11 @@ fn switch_to_selected_session(app: &mut AppState) {
         return;
     }
 
-    match app.store.load_messages(selected.id) {
-        Ok(messages) => {
+    match app.store.load_session(selected.id) {
+        Ok(loaded) => {
             app.active_session_id = selected.id;
-            app.messages = messages;
+            app.messages = loaded.messages;
+            app.model = loaded.model.unwrap_or_else(|| app.default_model.clone());
             app.composer_input.clear();
             app.transcript_scroll = 0;
             app.transcript_follow = true;
@@ -1129,6 +1180,7 @@ fn activate_session_or_create(
         let session_id = app.store.create_session()?;
         app.active_session_id = session_id;
         app.messages.clear();
+        app.model = app.default_model.clone();
         refresh_sessions(app, Some(session_id));
         return Ok(session_id);
     }
@@ -1147,8 +1199,10 @@ fn activate_session_or_create(
         })
         .unwrap_or(sessions[0].id);
 
+    let loaded = app.store.load_session(target_id)?;
     app.active_session_id = target_id;
-    app.messages = app.store.load_messages(target_id)?;
+    app.messages = loaded.messages;
+    app.model = loaded.model.unwrap_or_else(|| app.default_model.clone());
     app.composer_input.clear();
     app.transcript_scroll = 0;
     app.transcript_follow = true;
@@ -1272,9 +1326,20 @@ fn apply_selected_model(app: &mut AppState) {
         return;
     };
 
-    app.model = selected.clone();
-    app.mode = InputMode::Normal;
-    app.status_message = format!("Active model set to {selected}");
+    match app
+        .store
+        .set_session_model(app.active_session_id, &selected)
+    {
+        Ok(()) => {
+            app.model = selected.clone();
+            refresh_sessions(app, Some(app.active_session_id));
+            app.mode = InputMode::Normal;
+            app.status_message = format!("Session model set to {selected}");
+        }
+        Err(err) => {
+            app.status_message = format!("Failed to persist session model: {err}");
+        }
+    }
 }
 
 fn help_rows() -> Vec<String> {
@@ -1634,6 +1699,7 @@ fn run_palette_command(app: &mut AppState) -> bool {
                     Ok(session_id) => {
                         app.active_session_id = session_id;
                         app.messages.clear();
+                        app.model = app.default_model.clone();
                         app.composer_input.clear();
                         app.transcript_scroll = 0;
                         app.transcript_follow = true;
@@ -1723,6 +1789,7 @@ mod tests {
             .unwrap_or(0);
         AppState::new(
             "http://localhost:11434",
+            "test-model",
             "test-model",
             store,
             active_session_id,
@@ -1871,6 +1938,51 @@ mod tests {
             app.command_selected_index = 0;
             assert!(!run_palette_selected_command(&mut app));
             assert!(matches!(app.mode, InputMode::Help));
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn session_model_is_persisted_and_restored_on_switch() {
+        let db_path = temp_db_path("session-model-switch");
+        let (session_one, session_two);
+
+        {
+            let store = SessionStore::open(&db_path).expect("open store");
+            session_one = store
+                .load_or_create_active_session()
+                .expect("load")
+                .session_id;
+            session_two = store.create_session().expect("create");
+            store
+                .set_session_model(session_one, "qwen2.5-coder")
+                .expect("set model one");
+            store
+                .set_session_model(session_two, "llama3.2")
+                .expect("set model two");
+        }
+
+        {
+            let store = SessionStore::open(&db_path).expect("reopen");
+            let loaded = store.load_or_create_active_session().expect("load active");
+            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+
+            app.selected_session_index = app
+                .sessions
+                .iter()
+                .position(|session| session.id == session_one)
+                .expect("find session one");
+            switch_to_selected_session(&mut app);
+            assert_eq!(app.model, "qwen2.5-coder");
+
+            app.selected_session_index = app
+                .sessions
+                .iter()
+                .position(|session| session.id == session_two)
+                .expect("find session two");
+            switch_to_selected_session(&mut app);
+            assert_eq!(app.model, "llama3.2");
         }
 
         let _ = fs::remove_file(&db_path);

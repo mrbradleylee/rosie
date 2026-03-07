@@ -91,11 +91,12 @@ In the default TUI:
   - `:new`
   - `:rename [title]` (empty title clears it)
   - `:delete`
-  - `:models` (open model picker from Ollama `/api/tags`)
+  - `:models` (open model picker from Ollama `/api/tags` for the active session)
   - `:quit`
 - in the `:` command panel, use `j`/`k` (or arrows) to select from the command picklist and `Enter` to run
 - delete actions require confirmation (`[Y/n]`; `Enter` defaults to `Y`)
 - in the model picker, use `j`/`k` (or arrows) to move, `Enter` to apply, and `Esc` to cancel
+- selected models are persisted per session and restored when you switch sessions/restart
 - press `Esc` in `Normal` to cancel an in-flight request
 - `Ctrl+C` quits from any mode
 
