@@ -84,33 +84,35 @@ struct AppState {
     theme: ThemePalette,
 }
 
+struct AppStateInit {
+    host: String,
+    model: String,
+    default_model: String,
+    theme_key: String,
+    theme: ThemePalette,
+    store: SessionStore,
+    active_session_id: i64,
+    messages: Vec<ChatMessage>,
+    sessions: Vec<SessionSummary>,
+    selected_session_index: usize,
+}
+
 impl AppState {
-    fn new(
-        host: &str,
-        model: &str,
-        default_model: &str,
-        theme_key: &str,
-        theme: ThemePalette,
-        store: SessionStore,
-        active_session_id: i64,
-        messages: Vec<ChatMessage>,
-        sessions: Vec<SessionSummary>,
-        selected_session_index: usize,
-    ) -> Self {
+    fn new(init: AppStateInit) -> Self {
         Self {
             mode: InputMode::Normal,
-            host: host.to_string(),
-            default_model: default_model.to_string(),
-            model: model.to_string(),
+            host: init.host,
+            default_model: init.default_model,
+            model: init.model,
             composer_input: String::new(),
             command_input: String::new(),
             command_selected_index: 0,
-            messages,
-            active_session_id,
-            sessions,
-            selected_session_index,
+            messages: init.messages,
+            active_session_id: init.active_session_id,
+            sessions: init.sessions,
+            selected_session_index: init.selected_session_index,
             session_modal_offset: 0,
-            store,
+            store: init.store,
             transcript_scroll: 0,
             transcript_follow: true,
             transcript_view_width: 1,
@@ -132,10 +134,10 @@ impl AppState {
             session_rename_input: String::new(),
             status_message: format!(
                 "Loaded session #{}. Press i to enter Insert mode.",
-                active_session_id
+                init.active_session_id
             ),
-            theme_key: theme_key.to_string(),
-            theme,
+            theme_key: init.theme_key,
+            theme: init.theme,
         }
     }
 
@@ -487,18 +489,18 @@ fn run_loop(
         .iter()
         .position(|item| item.id == active_session_id)
         .unwrap_or(0);
-    let mut app = AppState::new(
-        host,
-        &active_model,
-        model,
-        theme_key,
+    let mut app = AppState::new(AppStateInit {
+        host: host.to_string(),
+        model: active_model,
+        default_model: model.to_string(),
+        theme_key: theme_key.to_string(),
         theme,
         store,
         active_session_id,
         messages,
         sessions,
         selected_session_index,
-    );
+    });
     app.mode = InputMode::Landing;
     app.status_message =
         "Welcome to Rosie. Type a message and press Enter to start, or Ctrl+P for commands."
@@ -744,9 +746,7 @@ fn run_loop(
                 let total_lines = transcript_base.line_count(app.transcript_view_width as u16);
                 let max_scroll = max_scroll_for_view(total_lines, app.transcript_view_height);
                 app.transcript_max_scroll = max_scroll;
-                if app.transcript_follow {
-                    app.transcript_scroll = max_scroll;
-                } else if app.transcript_scroll > max_scroll {
+                if app.transcript_follow || app.transcript_scroll > max_scroll {
                     app.transcript_scroll = max_scroll;
                 }
                 let transcript = transcript_base.scroll((app.transcript_scroll, 0));
@@ -1647,11 +1647,11 @@ fn process_stream_events(app: &mut AppState) {
         loop {
             match in_flight.receiver.try_recv() {
                 Ok(StreamEvent::Token(content)) => {
-                    if let Some(last) = app.messages.last_mut() {
-                        if last.role == "assistant" {
-                            last.content.push_str(&content);
-                            assistant_changed = true;
-                        }
+                    if let Some(last) = app.messages.last_mut()
+                        && last.role == "assistant"
+                    {
+                        last.content.push_str(&content);
+                        assistant_changed = true;
                     }
                     app.status_message = "Streaming response...".to_string();
                 }
@@ -1661,11 +1661,12 @@ fn process_stream_events(app: &mut AppState) {
                     break;
                 }
                 Ok(StreamEvent::Error(message)) => {
-                    if let Some(last) = app.messages.last_mut() {
-                        if last.role == "assistant" && last.content.trim().is_empty() {
-                            last.content = format!("[error] {message}");
-                            assistant_changed = true;
-                        }
+                    if let Some(last) = app.messages.last_mut()
+                        && last.role == "assistant"
+                        && last.content.trim().is_empty()
+                    {
+                        last.content = format!("[error] {message}");
+                        assistant_changed = true;
                     }
                     app.status_message = format!("Request error: {message}");
                     done = true;
@@ -1745,44 +1746,40 @@ fn process_title_fetch_events(app: &mut AppState) {
     let fetches = std::mem::take(&mut app.title_fetches);
     for mut fetch in fetches {
         let mut finished = false;
-        loop {
-            match fetch.receiver.try_recv() {
-                Ok(TitleFetchEvent::Generated {
-                    session_id,
-                    expected_title,
-                    generated_title,
-                }) => {
-                    let cleaned = normalize_generated_title(&generated_title);
-                    if !cleaned.is_empty() && cleaned != expected_title {
-                        match app.store.rename_session_if_current_title(
-                            session_id,
-                            Some(&expected_title),
-                            Some(&cleaned),
-                        ) {
-                            Ok(true) => {
-                                refresh_sessions(app, Some(app.active_session_id));
-                                if session_id == app.active_session_id {
-                                    app.status_message =
-                                        format!("Auto-renamed session to \"{cleaned}\".");
-                                }
+        match fetch.receiver.try_recv() {
+            Ok(TitleFetchEvent::Generated {
+                session_id,
+                expected_title,
+                generated_title,
+            }) => {
+                let cleaned = normalize_generated_title(&generated_title);
+                if !cleaned.is_empty() && cleaned != expected_title {
+                    match app.store.rename_session_if_current_title(
+                        session_id,
+                        Some(&expected_title),
+                        Some(&cleaned),
+                    ) {
+                        Ok(true) => {
+                            refresh_sessions(app, Some(app.active_session_id));
+                            if session_id == app.active_session_id {
+                                app.status_message =
+                                    format!("Auto-renamed session to \"{cleaned}\".");
                             }
-                            Ok(false) => {}
-                            Err(err) => {
-                                if session_id == app.active_session_id {
-                                    app.status_message =
-                                        format!("Failed to apply generated title: {err}");
-                                }
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            if session_id == app.active_session_id {
+                                app.status_message =
+                                    format!("Failed to apply generated title: {err}");
                             }
                         }
                     }
-                    finished = true;
-                    break;
                 }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    finished = true;
-                    break;
-                }
+                finished = true;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                finished = true;
             }
         }
 
@@ -1799,11 +1796,12 @@ fn cancel_request(app: &mut AppState, silent: bool) {
     if let Some(in_flight) = app.in_flight.take() {
         in_flight.handle.abort();
         let mut assistant_changed = false;
-        if let Some(last) = app.messages.last_mut() {
-            if last.role == "assistant" && last.content.trim().is_empty() {
-                last.content = "[cancelled]".to_string();
-                assistant_changed = true;
-            }
+        if let Some(last) = app.messages.last_mut()
+            && last.role == "assistant"
+            && last.content.trim().is_empty()
+        {
+            last.content = "[cancelled]".to_string();
+            assistant_changed = true;
         }
         if assistant_changed {
             persist_last_assistant_message(app, in_flight.assistant_message_id);
@@ -3668,18 +3666,18 @@ mod tests {
             .position(|session| session.id == active_session_id)
             .unwrap_or(0);
         let resolved = default_theme();
-        AppState::new(
-            "http://localhost:11434",
-            "test-model",
-            "test-model",
-            &resolved.key,
-            resolved.palette,
+        AppState::new(AppStateInit {
+            host: "http://localhost:11434".to_string(),
+            model: "test-model".to_string(),
+            default_model: "test-model".to_string(),
+            theme_key: resolved.key,
+            theme: resolved.palette,
             store,
             active_session_id,
             messages,
             sessions,
             selected_session_index,
-        )
+        })
     }
 
     #[test]
