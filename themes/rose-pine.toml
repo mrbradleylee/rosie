@@ -1,0 +1,36 @@
+name = "Rose Pine"
+
+[ui]
+bg = "#191724"
+panel = "#1f1d2e"
+panel_alt = "#26233a"
+text = "#e0def4"
+text_muted = "#908caa"
+border = "#403d52"
+border_active = "#524f67"
+title_label = "#ebbcba"
+title_value = "#31748f"
+title_value_alt = "#f6c177"
+title_meta = "#908caa"
+modal_bg = "#1f1d2e"
+modal_border = "#6e6a86"
+modal_title = "#e0def4"
+modal_selected_bg = "#403d52"
+modal_selected_fg = "#e0def4"
+
+[state]
+accent = "#c4a7e7"
+success = "#9ccfd8"
+info = "#31748f"
+warning = "#f6c177"
+error = "#eb6f92"
+
+[syntax]
+user = "#c4a7e7"
+assistant = "#e0def4"
+system = "#908caa"
+
+[highlight]
+low = "#21202e"
+mid = "#403d52"
+high = "#524f67"

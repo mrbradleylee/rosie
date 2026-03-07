@@ -1,0 +1,36 @@
+name = "Rose Pine Moon"
+
+[ui]
+bg = "#232136"
+panel = "#2a273f"
+panel_alt = "#393552"
+text = "#e0def4"
+text_muted = "#908caa"
+border = "#44415a"
+border_active = "#56526e"
+title_label = "#ea9a97"
+title_value = "#3e8fb0"
+title_value_alt = "#f6c177"
+title_meta = "#908caa"
+modal_bg = "#2a273f"
+modal_border = "#6e6a86"
+modal_title = "#e0def4"
+modal_selected_bg = "#44415a"
+modal_selected_fg = "#e0def4"
+
+[state]
+accent = "#c4a7e7"
+success = "#9ccfd8"
+info = "#3e8fb0"
+warning = "#f6c177"
+error = "#eb6f92"
+
+[syntax]
+user = "#c4a7e7"
+assistant = "#e0def4"
+system = "#908caa"
+
+[highlight]
+low = "#2a283e"
+mid = "#44415a"
+high = "#56526e"

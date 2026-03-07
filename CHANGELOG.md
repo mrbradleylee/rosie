@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+### Changed
+
+- Simplified the TUI status header to focus on mode/streaming state and removed non-actionable host details
+- Moved active session context into the transcript title and model context into the composer title
+- Added an in-transcript pending response indicator (`[waiting for model response...]`) while streaming before assistant tokens arrive
+- Updated the TUI status header label from `Rosie TUI` to `🤖 Rosie`
+- Added built-in TUI theme support with `catppuccin` and `rose-pine` presets via config (`theme`)
+- Applied semantic theme styling across status, transcript, composer, footer, and modal surfaces/borders for clearer visual separation
+- Changed the default theme to `rose-pine`
+- Added `:theme` palette command to view/switch themes at runtime and persist selection to config
+- Updated `--configure` to stop prompting for theme selection
+- Added file-backed theme loading from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`) using a documented color schema
+- Updated file theme schema to prefer semantic `[ui]` + `[state]` sections, with legacy `[colors]` still supported for compatibility
+- Switched default theme sourcing to packaged repo theme files (`themes/*.toml`) and added Rose Pine variants (`rose-pine`, `rose-pine-moon`, `rose-pine-dawn`)
+- Updated `:theme` with no arguments to open a picker modal sourced from config-dir themes (parallel to `:models`)
+- Removed theme name from the status bar title
+- Increased TUI visual contrast by applying `[highlight]`/`[syntax]` theme colors to panel separation and transcript role styling
+- Updated pane titles to use explicit semantic title/value colors (e.g., transcript session title and composer model) for improved contrast on dark and light themes
+- Added `ui.title_label`, `ui.title_value`, and `ui.title_meta` theme tokens so pane/title colors are sourced from theme files rather than fixed mappings
+- Updated bundled Rose Pine variant theme files to increase title/value contrast via theme tokens
+- Updated `--install` to copy bundled `themes/*.toml` into `${XDG_CONFIG_HOME:-~/.config}/rosie/themes`
+- Added `state.info` and `ui.title_value_alt` theme tokens for richer neutral-semantic theming (e.g., streaming/info states and secondary title values like model)
+- Themed all TUI modal windows (command/session/model/theme/help/confirm) with semantic modal tokens and selectable-row styling from theme files
+- Extended modal content theming to style headings, prompts, warnings/errors, active entries, and help sections via existing semantic theme tokens
+- Updated session startup behavior to restore the persisted last active session when sessions exist, and only create a new session when the local store is empty
+- Added a startup Landing mode with a dedicated title block, chat entry box, and quick command hints (`:session`, `:models`, `:theme`, `Ctrl+P`)
+- Updated session initialization to be lazy from Landing: Rosie now opens without creating a session until chat/model actions require one
+- Removed unused `sessions.is_archived` from the local TUI schema for new databases
+- Added first-pass fenced code block rendering in transcript with framed rails/gutter and language-aware syntax highlighting via `syntect` (with plain-style fallback)
+- Added transcript navigation UX improvements: `[ / ]` jumps between assistant blocks, conversation title scroll-position indicator, and off-follow hints for older/newer messages
+- Added first-pass markdown rendering for assistant output (headings, lists, blockquotes, horizontal rules, inline emphasis/code, and inline links), while keeping fenced code block rendering/highlighting intact
+- Updated README and man page to match current landing-first TUI flow, keybindings/help behavior, session restore behavior, theme install notes, and transcript rendering capabilities
+- Fixed CLI `--help` text to correctly show version short flag as `-V` (not `-v`)
+- Refactored TUI internals to split frame rendering and input handling into dedicated functions by concern/mode, reducing `run_loop` complexity without changing behavior
+- Consolidated command palette command metadata so command suggestions, help listing, and dispatch paths stay in sync
+- Refactored transcript rendering internals with dedicated helpers for assistant separators, content normalization, non-assistant text rows, and fenced-code block flushing
+- Added transcript rendering unit coverage for assistant separators/markers, fenced-code framing/padding, non-assistant prefix behavior, and markdown line invariants
+- Split `main.rs` concerns into dedicated modules (`cli`, `config`, `install`, `llm`, `paths`) to reduce coupling and keep runtime orchestration in `main.rs`
+- Added guardrail scripts for strict local quality checks (`scripts/check-quality.sh`) and command/docs parity validation (`scripts/check-command-docs.sh`), plus CI workflow wiring
+- Removed stale `docs/` planning/spec files and replaced them with a single current-state reference doc (`docs/current-runtime-and-tui-spec.md`)
+- Added `docs/theme-schema.md` with the supported theme file format, defaults/fallbacks, and apply/load behavior for community theme authors
+
 ## 0.7.0
 
 ### Added
