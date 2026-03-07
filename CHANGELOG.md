@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.8.1
+
+### Fixed
+
+- Fixed failing test by referencing included theme configurations instead of `XDG_CONFIG_HOME`
+
 ## 0.8.0
 
 ### Changed
