@@ -2853,23 +2853,23 @@ fn transcript_lines(
                 continue;
             }
 
+            if is_assistant {
+                rows.push(Line::from(markdown_line_spans(line, theme)));
+                wrote_first_content_line = true;
+                wrote_any = true;
+                continue;
+            }
+
             if !wrote_first_content_line {
-                if is_assistant {
-                    rows.push(Line::styled(
-                        line.to_string(),
-                        Style::default().fg(theme.text),
-                    ));
-                } else {
-                    rows.push(Line::from(vec![
-                        Span::styled(
-                            format!("{label}:"),
-                            Style::default()
-                                .fg(label_color)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(format!(" {line}"), Style::default().fg(theme.text)),
-                    ]));
-                }
+                rows.push(Line::from(vec![
+                    Span::styled(
+                        format!("{label}:"),
+                        Style::default()
+                            .fg(label_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!(" {line}"), Style::default().fg(theme.text)),
+                ]));
                 wrote_first_content_line = true;
             } else {
                 rows.push(Line::styled(
@@ -2964,6 +2964,202 @@ fn select_syntect_theme(theme_set: &ThemeSet, theme: ThemePalette) -> Option<&Sy
         .themes
         .get(preferred)
         .or_else(|| theme_set.themes.values().next())
+}
+
+fn markdown_line_spans(line: &str, theme: ThemePalette) -> Vec<Span<'static>> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() {
+        return vec![Span::raw("")];
+    }
+
+    if is_markdown_hr(trimmed) {
+        return vec![Span::styled(
+            "────────────────────────────────".to_string(),
+            Style::default().fg(theme.title_meta),
+        )];
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("### ") {
+        let mut spans = vec![Span::styled(
+            "### ".to_string(),
+            Style::default().fg(theme.title_meta),
+        )];
+        spans.extend(markdown_inline_spans(
+            rest,
+            Style::default()
+                .fg(theme.title_value_alt)
+                .add_modifier(Modifier::BOLD),
+            theme,
+        ));
+        return spans;
+    }
+    if let Some(rest) = trimmed.strip_prefix("## ") {
+        let mut spans = vec![Span::styled(
+            "## ".to_string(),
+            Style::default().fg(theme.title_meta),
+        )];
+        spans.extend(markdown_inline_spans(
+            rest,
+            Style::default()
+                .fg(theme.title_value)
+                .add_modifier(Modifier::BOLD),
+            theme,
+        ));
+        return spans;
+    }
+    if let Some(rest) = trimmed.strip_prefix("# ") {
+        let mut spans = vec![Span::styled(
+            "# ".to_string(),
+            Style::default().fg(theme.title_meta),
+        )];
+        spans.extend(markdown_inline_spans(
+            rest,
+            Style::default()
+                .fg(theme.title_label)
+                .add_modifier(Modifier::BOLD),
+            theme,
+        ));
+        return spans;
+    }
+    if let Some(rest) = trimmed.strip_prefix("> ") {
+        let mut spans = vec![Span::styled(
+            "▎ ".to_string(),
+            Style::default().fg(theme.title_meta),
+        )];
+        spans.extend(markdown_inline_spans(
+            rest,
+            Style::default().fg(theme.muted),
+            theme,
+        ));
+        return spans;
+    }
+    if let Some(rest) = parse_markdown_list_item(trimmed) {
+        let mut spans = vec![Span::styled(
+            "• ".to_string(),
+            Style::default().fg(theme.success),
+        )];
+        spans.extend(markdown_inline_spans(
+            rest,
+            Style::default().fg(theme.text),
+            theme,
+        ));
+        return spans;
+    }
+
+    markdown_inline_spans(trimmed, Style::default().fg(theme.text), theme)
+}
+
+fn markdown_inline_spans(text: &str, base: Style, theme: ThemePalette) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    let mut bold = false;
+    let mut italic = false;
+    let mut code = false;
+
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("**") {
+            bold = !bold;
+            rest = after;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('*') {
+            italic = !italic;
+            rest = after;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('`') {
+            code = !code;
+            rest = after;
+            continue;
+        }
+        if let Some((label, after_link)) = parse_markdown_link(rest) {
+            let mut style = base.fg(theme.info).add_modifier(Modifier::UNDERLINED);
+            if bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            if italic {
+                style = style.add_modifier(Modifier::ITALIC);
+            }
+            if code {
+                style = style.bg(theme.surface_alt);
+            }
+            spans.push(Span::styled(label, style));
+            rest = after_link;
+            continue;
+        }
+
+        let next_idx = next_markdown_token_index(rest);
+        let (chunk, after) = rest.split_at(next_idx);
+        let mut style = base;
+        if bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if italic {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if code {
+            style = style
+                .fg(theme.title_value_alt)
+                .bg(theme.surface_alt)
+                .add_modifier(Modifier::BOLD);
+        }
+        spans.push(Span::styled(chunk.to_string(), style));
+        rest = after;
+    }
+
+    if spans.is_empty() {
+        vec![Span::styled(String::new(), base)]
+    } else {
+        spans
+    }
+}
+
+fn parse_markdown_link(input: &str) -> Option<(String, &str)> {
+    if !input.starts_with('[') {
+        return None;
+    }
+    let label_end = input.find("](")?;
+    let label = &input[1..label_end];
+    let url_end_rel = input[label_end + 2..].find(')')?;
+    let after = &input[label_end + 2 + url_end_rel + 1..];
+    Some((label.to_string(), after))
+}
+
+fn next_markdown_token_index(input: &str) -> usize {
+    let mut idx = input.len();
+    for token in ["**", "*", "`", "["] {
+        if let Some(pos) = input.find(token) {
+            idx = idx.min(pos);
+        }
+    }
+    idx.max(1)
+}
+
+fn is_markdown_hr(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed == "---" || trimmed == "***" || trimmed == "___"
+}
+
+fn parse_markdown_list_item(line: &str) -> Option<&str> {
+    if let Some(rest) = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .or_else(|| line.strip_prefix("+ "))
+    {
+        return Some(rest);
+    }
+    let mut digits = 0usize;
+    for ch in line.chars() {
+        if ch.is_ascii_digit() {
+            digits += 1;
+            continue;
+        }
+        break;
+    }
+    if digits > 0 && line[digits..].starts_with(". ") {
+        return Some(&line[digits + 2..]);
+    }
+    None
 }
 
 fn highlighted_code_spans(
