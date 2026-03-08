@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.2
+
 ### Fixed
 
 - In landing mode, submitting the initial chat prompt now always creates a new session instead of reusing the previously loaded active session
