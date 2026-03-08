@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- In landing mode, submitting the initial chat prompt now always creates a new session instead of reusing the previously loaded active session
+- Fixed session auto-title tokenization so apostrophes in contractions (for example, `What's`) are preserved instead of splitting into separate tokens
+
 ## 0.8.1
 
 ### Fixed
