@@ -1422,6 +1422,9 @@ fn submit_composer_message(app: &mut AppState) {
     if user_content.is_empty() {
         return;
     }
+    if app.mode == InputMode::Landing && !create_fresh_session_for_landing_submit(app) {
+        return;
+    }
     if !ensure_active_session_for_chat(app) {
         return;
     }
@@ -1476,6 +1479,30 @@ fn submit_composer_message(app: &mut AppState) {
     app.transcript_follow = true;
     refresh_sessions(app, Some(app.active_session_id));
     app.status_message = "Sending request to Ollama...".to_string();
+}
+
+fn create_fresh_session_for_landing_submit(app: &mut AppState) -> bool {
+    match app.store.create_session() {
+        Ok(session_id) => {
+            if let Err(err) = app.store.set_last_active_session_id(session_id) {
+                app.status_message = format!(
+                    "Started new session #{}, but failed to persist active session: {err}",
+                    session_id
+                );
+            }
+            app.active_session_id = session_id;
+            app.messages.clear();
+            app.model = app.default_model.clone();
+            app.transcript_scroll = 0;
+            app.transcript_follow = true;
+            refresh_sessions(app, Some(session_id));
+            true
+        }
+        Err(err) => {
+            app.status_message = format!("Failed to create session: {err}");
+            false
+        }
+    }
 }
 
 fn ensure_active_session_for_chat(app: &mut AppState) -> bool {
@@ -1614,7 +1641,12 @@ fn suggest_session_title(message: &str) -> String {
     let normalized = first_line
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch.is_whitespace() || ch == '-' || ch == '/' {
+            if ch.is_ascii_alphanumeric()
+                || ch.is_whitespace()
+                || ch == '-'
+                || ch == '/'
+                || ch == '\''
+            {
                 ch
             } else {
                 ' '
@@ -4107,6 +4139,41 @@ mod tests {
     }
 
     #[test]
+    fn landing_submit_creates_new_session_instead_of_reusing_loaded_one() {
+        let db_path = temp_db_path("landing-new-session");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open");
+            let first = store
+                .load_or_create_active_session()
+                .expect("load/create first")
+                .session_id;
+            store
+                .insert_message(first, "user", "existing history")
+                .expect("insert existing history");
+        }
+
+        {
+            let store = SessionStore::open(&db_path).expect("reopen");
+            let loaded = store.load_or_create_active_session().expect("load active");
+            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+            let original_session_id = app.active_session_id;
+            let original_session_count = app.sessions.len();
+
+            app.mode = InputMode::Landing;
+            app.composer_input = "new chat prompt".to_string();
+
+            assert!(create_fresh_session_for_landing_submit(&mut app));
+            assert_ne!(app.active_session_id, original_session_id);
+            assert_eq!(app.sessions.len(), original_session_count + 1);
+            assert!(app.messages.is_empty());
+            assert_eq!(app.composer_input, "new chat prompt");
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
     fn auto_titles_new_session_from_first_message() {
         let db_path = temp_db_path("auto-title");
 
@@ -4138,6 +4205,13 @@ mod tests {
         );
         assert!(title.len() <= 35);
         assert!(title.ends_with("..."));
+    }
+
+    #[test]
+    fn suggest_session_title_preserves_contractions() {
+        let title = suggest_session_title("What's the difference between beef and chicken?");
+        assert!(title.starts_with("What's "));
+        assert!(!title.starts_with("What S "));
     }
 
     #[test]
