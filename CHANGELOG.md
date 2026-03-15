@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.3
+
 ### Changed
 
 - Cached fully rendered assistant transcript blocks in the TUI so unchanged markdown and code output can be reused across redraws, while invalidating cleanly when assistant content, theme, or transcript width changes
