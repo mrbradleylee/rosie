@@ -6,6 +6,7 @@
 
 - Cached fully rendered assistant transcript blocks in the TUI so unchanged markdown and code output can be reused across redraws, while invalidating cleanly when assistant content, theme, or transcript width changes
 - Reduced SQLite churn for streamed assistant replies by persisting assistant message content only when a response completes, errors, or is cancelled instead of updating the database on intermediate token receipt
+- Reused a shared Ollama `reqwest::Client` across chat streaming, model discovery, and session-title generation instead of constructing a new HTTP client for each request
 
 ## 0.8.2
 

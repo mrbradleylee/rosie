@@ -50,6 +50,7 @@ pub fn run(
 struct AppState {
     mode: InputMode,
     host: String,
+    ollama_client: reqwest::Client,
     default_model: String,
     model: String,
     composer_input: String,
@@ -88,6 +89,7 @@ struct AppState {
 
 struct AppStateInit {
     host: String,
+    ollama_client: reqwest::Client,
     model: String,
     default_model: String,
     theme_key: String,
@@ -104,6 +106,7 @@ impl AppState {
         Self {
             mode: InputMode::Normal,
             host: init.host,
+            ollama_client: init.ollama_client,
             default_model: init.default_model,
             model: init.model,
             composer_input: String::new(),
@@ -494,6 +497,7 @@ fn run_loop(
         .unwrap_or(0);
     let mut app = AppState::new(AppStateInit {
         host: host.to_string(),
+        ollama_client: reqwest::Client::new(),
         model: active_model,
         default_model: model.to_string(),
         theme_key: theme_key.to_string(),
@@ -1461,9 +1465,12 @@ fn submit_composer_message(app: &mut AppState) {
     let (tx, rx) = mpsc::unbounded_channel();
     let host = app.host.clone();
     let model = app.model.clone();
+    let client = app.ollama_client.clone();
 
     let handle = tokio::spawn(async move {
-        if let Err(err) = stream_ollama_chat(&host, &model, request_messages, tx.clone()).await {
+        if let Err(err) =
+            stream_ollama_chat(&client, &host, &model, request_messages, tx.clone()).await
+        {
             let _ = tx.send(StreamEvent::Error(err.to_string()));
         }
     });
@@ -1570,11 +1577,12 @@ fn start_generated_session_title(
     let (tx, rx) = mpsc::unbounded_channel();
     let host = app.host.clone();
     let model = app.model.clone();
+    let client = app.ollama_client.clone();
     let expected_title = expected_title.to_string();
     let first_user_message = first_user_message.to_string();
     let handle = runtime.spawn(async move {
         if let Ok(generated_title) =
-            generate_session_title(&host, &model, &first_user_message).await
+            generate_session_title(&client, &host, &model, &first_user_message).await
         {
             let _ = tx.send(TitleFetchEvent::Generated {
                 session_id,
@@ -2376,8 +2384,9 @@ fn open_model_picker(app: &mut AppState) {
 
     let (tx, rx) = mpsc::unbounded_channel();
     let host = app.host.clone();
+    let client = app.ollama_client.clone();
     let handle = runtime.spawn(async move {
-        match fetch_ollama_models(&host).await {
+        match fetch_ollama_models(&client, &host).await {
             Ok(models) => {
                 let _ = tx.send(ModelFetchEvent::Loaded(models));
             }
@@ -3572,13 +3581,13 @@ struct OllamaGenerateResponse {
 }
 
 async fn stream_ollama_chat(
+    client: &reqwest::Client,
     host: &str,
     model: &str,
     messages: Vec<ChatMessage>,
     tx: mpsc::UnboundedSender<StreamEvent>,
 ) -> Result<()> {
     let url = format!("{}/api/chat", host.trim_end_matches('/'));
-    let client = reqwest::Client::new();
     let request = OllamaChatRequest {
         model: model.to_string(),
         messages,
@@ -3629,7 +3638,7 @@ async fn stream_ollama_chat(
     Ok(())
 }
 
-async fn fetch_ollama_models(host: &str) -> Result<Vec<String>> {
+async fn fetch_ollama_models(client: &reqwest::Client, host: &str) -> Result<Vec<String>> {
     #[derive(Deserialize)]
     struct OllamaModel {
         name: String,
@@ -3641,7 +3650,6 @@ async fn fetch_ollama_models(host: &str) -> Result<Vec<String>> {
     }
 
     let url = format!("{}/api/tags", host.trim_end_matches('/'));
-    let client = reqwest::Client::new();
     let resp = client
         .get(url)
         .send()
@@ -3667,6 +3675,7 @@ async fn fetch_ollama_models(host: &str) -> Result<Vec<String>> {
 }
 
 async fn generate_session_title(
+    client: &reqwest::Client,
     host: &str,
     model: &str,
     first_user_message: &str,
@@ -3681,7 +3690,6 @@ async fn generate_session_title(
         stream: false,
     };
     let url = format!("{}/api/generate", host.trim_end_matches('/'));
-    let client = reqwest::Client::new();
     let resp = client
         .post(url)
         .json(&request)
@@ -3931,6 +3939,10 @@ mod tests {
         let resolved = default_theme();
         AppState::new(AppStateInit {
             host: "http://localhost:11434".to_string(),
+            ollama_client: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("build test ollama client"),
             model: "test-model".to_string(),
             default_model: "test-model".to_string(),
             theme_key: resolved.key,
