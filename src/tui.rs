@@ -1744,7 +1744,7 @@ fn format_title_token(token: &str) -> String {
 
 fn process_stream_events(app: &mut AppState) {
     let mut done = false;
-    let mut assistant_changed = false;
+    let mut should_persist = false;
     let assistant_message_id = {
         let Some(in_flight) = app.in_flight.as_mut() else {
             return;
@@ -1758,12 +1758,12 @@ fn process_stream_events(app: &mut AppState) {
                         && last.role == "assistant"
                     {
                         last.content.push_str(&content);
-                        assistant_changed = true;
                     }
                     app.status_message = "Streaming response...".to_string();
                 }
                 Ok(StreamEvent::Done) => {
                     app.status_message = "Response complete.".to_string();
+                    should_persist = true;
                     done = true;
                     break;
                 }
@@ -1773,14 +1773,15 @@ fn process_stream_events(app: &mut AppState) {
                         && last.content.trim().is_empty()
                     {
                         last.content = format!("[error] {message}");
-                        assistant_changed = true;
                     }
                     app.status_message = format!("Request error: {message}");
+                    should_persist = true;
                     done = true;
                     break;
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    should_persist = true;
                     done = true;
                     break;
                 }
@@ -1789,7 +1790,7 @@ fn process_stream_events(app: &mut AppState) {
         assistant_message_id
     };
 
-    if assistant_changed {
+    if should_persist {
         persist_last_assistant_message(app, assistant_message_id);
     }
 
@@ -1902,17 +1903,13 @@ fn process_title_fetch_events(app: &mut AppState) {
 fn cancel_request(app: &mut AppState, silent: bool) {
     if let Some(in_flight) = app.in_flight.take() {
         in_flight.handle.abort();
-        let mut assistant_changed = false;
         if let Some(last) = app.messages.last_mut()
             && last.role == "assistant"
             && last.content.trim().is_empty()
         {
             last.content = "[cancelled]".to_string();
-            assistant_changed = true;
         }
-        if assistant_changed {
-            persist_last_assistant_message(app, in_flight.assistant_message_id);
-        }
+        persist_last_assistant_message(app, in_flight.assistant_message_id);
         if !silent {
             app.status_message = "Streaming cancelled.".to_string();
         }
@@ -3966,6 +3963,15 @@ mod tests {
         (lines, render.assistant_markers)
     }
 
+    fn last_persisted_message_content(store: &SessionStore, session_id: i64) -> String {
+        store
+            .load_messages(session_id)
+            .expect("load messages")
+            .last()
+            .map(|message| message.content.clone())
+            .unwrap_or_default()
+    }
+
     #[test]
     fn cached_transcript_render_matches_uncached_render() {
         let db_path = temp_db_path("cached-render-match");
@@ -4039,6 +4045,102 @@ mod tests {
             assert_eq!(width_updated.view_width, 100);
             assert_eq!(width_updated.content, "second");
             assert_eq!(width_updated.rows, before_width_rows);
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn stream_tokens_are_not_persisted_until_completion() {
+        let db_path = temp_db_path("stream-persist-on-complete");
+
+        {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let store = SessionStore::open(&db_path).expect("open store");
+            let session_id = store
+                .load_or_create_active_session()
+                .expect("load session")
+                .session_id;
+            let assistant_message_id = store
+                .insert_message(session_id, "assistant", "")
+                .expect("insert assistant placeholder");
+            let mut app = build_app_from_store(
+                store,
+                session_id,
+                vec![ChatMessage {
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                }],
+            );
+            let (tx, rx) = mpsc::unbounded_channel();
+            app.in_flight = Some(InFlightRequest {
+                receiver: rx,
+                handle: runtime.spawn(async {}),
+                assistant_message_id,
+            });
+
+            tx.send(StreamEvent::Token("hello".to_string()))
+                .expect("send token");
+            process_stream_events(&mut app);
+
+            assert_eq!(app.messages[0].content, "hello");
+            assert_eq!(last_persisted_message_content(&app.store, session_id), "");
+
+            tx.send(StreamEvent::Done).expect("send done");
+            process_stream_events(&mut app);
+
+            assert_eq!(
+                last_persisted_message_content(&app.store, session_id),
+                "hello"
+            );
+            assert!(app.in_flight.is_none());
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn cancelling_stream_persists_partial_assistant_content() {
+        let db_path = temp_db_path("stream-persist-on-cancel");
+
+        {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let store = SessionStore::open(&db_path).expect("open store");
+            let session_id = store
+                .load_or_create_active_session()
+                .expect("load session")
+                .session_id;
+            let assistant_message_id = store
+                .insert_message(session_id, "assistant", "")
+                .expect("insert assistant placeholder");
+            let mut app = build_app_from_store(
+                store,
+                session_id,
+                vec![ChatMessage {
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                }],
+            );
+            let (tx, rx) = mpsc::unbounded_channel();
+            app.in_flight = Some(InFlightRequest {
+                receiver: rx,
+                handle: runtime.spawn(async {}),
+                assistant_message_id,
+            });
+
+            tx.send(StreamEvent::Token("partial".to_string()))
+                .expect("send token");
+            process_stream_events(&mut app);
+            assert_eq!(last_persisted_message_content(&app.store, session_id), "");
+
+            cancel_request(&mut app, false);
+
+            assert_eq!(
+                last_persisted_message_content(&app.store, session_id),
+                "partial"
+            );
+            assert!(app.in_flight.is_none());
+            assert_eq!(app.status_message, "Streaming cancelled.");
         }
 
         let _ = fs::remove_file(&db_path);
