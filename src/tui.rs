@@ -13,6 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io;
@@ -66,6 +67,7 @@ struct AppState {
     transcript_view_height: usize,
     transcript_max_scroll: u16,
     transcript_assistant_markers: Vec<u16>,
+    transcript_render_cache: HashMap<usize, CachedAssistantRender>,
     pending_g: bool,
     in_flight: Option<InFlightRequest>,
     model_fetch: Option<InFlightModelFetch>,
@@ -119,6 +121,7 @@ impl AppState {
             transcript_view_height: 1,
             transcript_max_scroll: 0,
             transcript_assistant_markers: Vec::new(),
+            transcript_render_cache: HashMap::new(),
             pending_g: false,
             in_flight: None,
             model_fetch: None,
@@ -1054,12 +1057,7 @@ fn render_main_panes(
     });
     app.transcript_view_width = transcript_inner.width.max(1) as usize;
     app.transcript_view_height = transcript_inner.height.max(1) as usize;
-    let transcript_render = transcript_lines(
-        &app.messages,
-        app.is_busy(),
-        theme,
-        app.transcript_view_width,
-    );
+    let transcript_render = transcript_lines_cached(app, app.transcript_view_width);
     app.transcript_assistant_markers = transcript_render.assistant_markers;
     let conversation_title = conversation_header_title(app);
     let mut transcript_title_spans = vec![Span::styled(
@@ -2838,6 +2836,15 @@ struct TranscriptRender {
     assistant_markers: Vec<u16>,
 }
 
+#[derive(Clone)]
+struct CachedAssistantRender {
+    content: String,
+    theme_key: String,
+    view_width: usize,
+    rows: Vec<Line<'static>>,
+    assistant_marker_offset: Option<u16>,
+}
+
 struct MessageRenderCtx<'a> {
     label: &'a str,
     label_color: Color,
@@ -2850,6 +2857,7 @@ struct MessageRenderCtx<'a> {
     theme: ThemePalette,
 }
 
+#[cfg(test)]
 fn transcript_lines(
     messages: &[ChatMessage],
     is_busy: bool,
@@ -2869,116 +2877,208 @@ fn transcript_lines(
     let mut rows = Vec::new();
     let mut assistant_markers = Vec::new();
     for (idx, message) in messages.iter().enumerate() {
-        let (label, label_color) = match message.role.as_str() {
-            "user" => ("You", theme.user),
-            "assistant" => ("Assistant", theme.assistant),
-            _ => ("System", theme.system),
-        };
-        let is_assistant = message.role == "assistant";
-        let ctx = MessageRenderCtx {
-            label,
-            label_color,
-            is_assistant,
-            wrap_pad: "  ",
-            text_style: Style::default().fg(theme.text),
-            code_style: Style::default().fg(theme.text).bg(theme.surface_alt),
-            rail_style: Style::default()
-                .fg(theme.title_meta)
-                .bg(theme.highlight_low),
-            gutter_style: Style::default()
-                .fg(theme.title_value_alt)
-                .bg(theme.surface_alt),
-            theme,
-        };
-
-        if ctx.is_assistant {
-            push_assistant_separator(&mut rows, &mut assistant_markers, theme);
+        let block = render_message_block(message, is_busy, idx, messages.len(), theme);
+        if let Some(offset) = block.assistant_marker_offset {
+            assistant_markers.push((rows.len() as u16).saturating_add(offset));
         }
-
-        let content = message_content_for_render(message, is_busy, idx, messages.len());
-        let mut in_code_block = false;
-        let mut code_highlighter: Option<HighlightLines<'static>> = None;
-        let mut code_lines: Vec<String> = Vec::new();
-        let mut wrote_any = false;
-        let mut wrote_first_content_line = false;
-
-        for line in content.lines() {
-            let is_fence = line.trim_start().starts_with("```");
-            if is_fence {
-                if !in_code_block {
-                    let lang = line.trim_start().trim_start_matches("```").trim();
-                    let code_label = if lang.is_empty() {
-                        "code".to_string()
-                    } else {
-                        format!("code: {lang}")
-                    };
-                    rows.push(Line::from(vec![
-                        Span::styled("  ╭─ ".to_string(), ctx.rail_style),
-                        Span::styled(code_label, ctx.rail_style.add_modifier(Modifier::BOLD)),
-                    ]));
-                    code_highlighter = build_code_highlighter(
-                        if lang.is_empty() { None } else { Some(lang) },
-                        theme,
-                    );
-                    code_lines.clear();
-                    in_code_block = true;
-                    wrote_any = true;
-                } else {
-                    flush_code_block(
-                        &mut rows,
-                        &code_lines,
-                        &mut code_highlighter,
-                        &mut wrote_first_content_line,
-                        &ctx,
-                    );
-                    code_lines.clear();
-                    code_highlighter = None;
-                    in_code_block = false;
-                    wrote_any = true;
-                }
-                continue;
-            }
-
-            if in_code_block {
-                code_lines.push(line.to_string());
-                wrote_any = true;
-                continue;
-            }
-
-            if ctx.is_assistant {
-                rows.push(Line::from(markdown_line_spans(line, ctx.theme)));
-                wrote_first_content_line = true;
-                wrote_any = true;
-                continue;
-            }
-
-            push_non_assistant_text_line(&mut rows, line, &mut wrote_first_content_line, &ctx);
-            wrote_any = true;
-        }
-
-        if in_code_block {
-            flush_code_block(
-                &mut rows,
-                &code_lines,
-                &mut code_highlighter,
-                &mut wrote_first_content_line,
-                &ctx,
-            );
-        }
-
-        if !wrote_any && !ctx.is_assistant {
-            rows.push(Line::styled(
-                format!("{}:", ctx.label),
-                Style::default()
-                    .fg(ctx.label_color)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        rows.push(Line::raw(""));
+        rows.extend(block.rows);
     }
     TranscriptRender {
         lines: rows,
         assistant_markers,
+    }
+}
+
+fn transcript_lines_cached(app: &mut AppState, view_width: usize) -> TranscriptRender {
+    let messages = &app.messages;
+    let theme = app.theme;
+    if messages.is_empty() {
+        return TranscriptRender {
+            lines: vec![Line::styled(
+                "No messages yet. Press i, type, then Enter.".to_string(),
+                Style::default().fg(theme.muted),
+            )],
+            assistant_markers: Vec::new(),
+        };
+    }
+
+    app.transcript_render_cache
+        .retain(|idx, _| *idx < messages.len());
+
+    let mut rows = Vec::new();
+    let mut assistant_markers = Vec::new();
+    for (idx, message) in messages.iter().enumerate() {
+        let content = message_content_for_render(message, app.is_busy(), idx, messages.len());
+        let cached_rows = if message.role == "assistant" {
+            if let Some(cached) = app.transcript_render_cache.get(&idx) {
+                if cached.content == content
+                    && cached.theme_key == app.theme_key
+                    && cached.view_width == view_width
+                {
+                    Some((cached.rows.clone(), cached.assistant_marker_offset))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let (block_rows, assistant_marker_offset) = if let Some(cached) = cached_rows {
+            cached
+        } else {
+            let block = render_message_block(message, app.is_busy(), idx, messages.len(), theme);
+            if message.role == "assistant" {
+                app.transcript_render_cache.insert(
+                    idx,
+                    CachedAssistantRender {
+                        content,
+                        theme_key: app.theme_key.clone(),
+                        view_width,
+                        rows: block.rows.clone(),
+                        assistant_marker_offset: block.assistant_marker_offset,
+                    },
+                );
+            }
+            (block.rows, block.assistant_marker_offset)
+        };
+
+        if let Some(offset) = assistant_marker_offset {
+            assistant_markers.push((rows.len() as u16).saturating_add(offset));
+        }
+        rows.extend(block_rows);
+    }
+
+    TranscriptRender {
+        lines: rows,
+        assistant_markers,
+    }
+}
+
+struct MessageRenderBlock {
+    rows: Vec<Line<'static>>,
+    assistant_marker_offset: Option<u16>,
+}
+
+fn render_message_block(
+    message: &ChatMessage,
+    is_busy: bool,
+    idx: usize,
+    total_messages: usize,
+    theme: ThemePalette,
+) -> MessageRenderBlock {
+    let (label, label_color) = match message.role.as_str() {
+        "user" => ("You", theme.user),
+        "assistant" => ("Assistant", theme.assistant),
+        _ => ("System", theme.system),
+    };
+    let is_assistant = message.role == "assistant";
+    let ctx = MessageRenderCtx {
+        label,
+        label_color,
+        is_assistant,
+        wrap_pad: "  ",
+        text_style: Style::default().fg(theme.text),
+        code_style: Style::default().fg(theme.text).bg(theme.surface_alt),
+        rail_style: Style::default()
+            .fg(theme.title_meta)
+            .bg(theme.highlight_low),
+        gutter_style: Style::default()
+            .fg(theme.title_value_alt)
+            .bg(theme.surface_alt),
+        theme,
+    };
+
+    let mut rows = Vec::new();
+    let mut assistant_markers = Vec::new();
+    if ctx.is_assistant {
+        push_assistant_separator(&mut rows, &mut assistant_markers, theme);
+    }
+
+    let content = message_content_for_render(message, is_busy, idx, total_messages);
+    let mut in_code_block = false;
+    let mut code_highlighter: Option<HighlightLines<'static>> = None;
+    let mut code_lines: Vec<String> = Vec::new();
+    let mut wrote_any = false;
+    let mut wrote_first_content_line = false;
+
+    for line in content.lines() {
+        let is_fence = line.trim_start().starts_with("```");
+        if is_fence {
+            if !in_code_block {
+                let lang = line.trim_start().trim_start_matches("```").trim();
+                let code_label = if lang.is_empty() {
+                    "code".to_string()
+                } else {
+                    format!("code: {lang}")
+                };
+                rows.push(Line::from(vec![
+                    Span::styled("  ╭─ ".to_string(), ctx.rail_style),
+                    Span::styled(code_label, ctx.rail_style.add_modifier(Modifier::BOLD)),
+                ]));
+                code_highlighter =
+                    build_code_highlighter(if lang.is_empty() { None } else { Some(lang) }, theme);
+                code_lines.clear();
+                in_code_block = true;
+                wrote_any = true;
+            } else {
+                flush_code_block(
+                    &mut rows,
+                    &code_lines,
+                    &mut code_highlighter,
+                    &mut wrote_first_content_line,
+                    &ctx,
+                );
+                code_lines.clear();
+                code_highlighter = None;
+                in_code_block = false;
+                wrote_any = true;
+            }
+            continue;
+        }
+
+        if in_code_block {
+            code_lines.push(line.to_string());
+            wrote_any = true;
+            continue;
+        }
+
+        if ctx.is_assistant {
+            rows.push(Line::from(markdown_line_spans(line, ctx.theme)));
+            wrote_first_content_line = true;
+            wrote_any = true;
+            continue;
+        }
+
+        push_non_assistant_text_line(&mut rows, line, &mut wrote_first_content_line, &ctx);
+        wrote_any = true;
+    }
+
+    if in_code_block {
+        flush_code_block(
+            &mut rows,
+            &code_lines,
+            &mut code_highlighter,
+            &mut wrote_first_content_line,
+            &ctx,
+        );
+    }
+
+    if !wrote_any && !ctx.is_assistant {
+        rows.push(Line::styled(
+            format!("{}:", ctx.label),
+            Style::default()
+                .fg(ctx.label_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    rows.push(Line::raw(""));
+
+    MessageRenderBlock {
+        rows,
+        assistant_marker_offset: assistant_markers.first().copied(),
     }
 }
 
@@ -3858,6 +3958,90 @@ mod tests {
         let render = transcript_lines(&messages, is_busy, theme, 80);
         let lines = render.lines.iter().map(line_text).collect::<Vec<_>>();
         (lines, render.assistant_markers)
+    }
+
+    fn render_cached_lines_text(app: &mut AppState, view_width: usize) -> (Vec<String>, Vec<u16>) {
+        let render = transcript_lines_cached(app, view_width);
+        let lines = render.lines.iter().map(line_text).collect::<Vec<_>>();
+        (lines, render.assistant_markers)
+    }
+
+    #[test]
+    fn cached_transcript_render_matches_uncached_render() {
+        let db_path = temp_db_path("cached-render-match");
+        let theme = default_theme().palette;
+
+        {
+            let store = SessionStore::open(&db_path).expect("open store");
+            let loaded = store.load_or_create_active_session().expect("load");
+            let messages = vec![
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "Show me some Rust".to_string(),
+                },
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "# Example\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n"
+                        .to_string(),
+                },
+            ];
+            let mut app = build_app_from_store(store, loaded.session_id, messages.clone());
+
+            let uncached = transcript_lines(&messages, false, theme, 80);
+            let cached = transcript_lines_cached(&mut app, 80);
+
+            let uncached_lines = uncached.lines.iter().map(line_text).collect::<Vec<_>>();
+            let cached_lines = cached.lines.iter().map(line_text).collect::<Vec<_>>();
+            assert_eq!(cached_lines, uncached_lines);
+            assert_eq!(cached.assistant_markers, uncached.assistant_markers);
+            assert_eq!(app.transcript_render_cache.len(), 1);
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn cached_transcript_render_invalidates_on_content_and_width_change() {
+        let db_path = temp_db_path("cached-render-invalidation");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open store");
+            let loaded = store.load_or_create_active_session().expect("load");
+            let messages = vec![ChatMessage {
+                role: "assistant".to_string(),
+                content: "first".to_string(),
+            }];
+            let mut app = build_app_from_store(store, loaded.session_id, messages);
+
+            let (first_lines, first_markers) = render_cached_lines_text(&mut app, 80);
+            let cached = app
+                .transcript_render_cache
+                .get(&0)
+                .expect("assistant cache entry");
+            assert_eq!(cached.content, "first");
+
+            app.messages[0].content = "second".to_string();
+            let (second_lines, second_markers) = render_cached_lines_text(&mut app, 80);
+            let updated = app
+                .transcript_render_cache
+                .get(&0)
+                .expect("updated assistant cache entry");
+            assert_eq!(updated.content, "second");
+            assert_ne!(second_lines, first_lines);
+            assert_eq!(second_markers, first_markers);
+
+            let before_width_rows = updated.rows.clone();
+            let _ = render_cached_lines_text(&mut app, 100);
+            let width_updated = app
+                .transcript_render_cache
+                .get(&0)
+                .expect("width-updated assistant cache entry");
+            assert_eq!(width_updated.view_width, 100);
+            assert_eq!(width_updated.content, "second");
+            assert_eq!(width_updated.rows, before_width_rows);
+        }
+
+        let _ = fs::remove_file(&db_path);
     }
 
     #[test]
