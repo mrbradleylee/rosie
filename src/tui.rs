@@ -59,6 +59,7 @@ struct AppState {
     messages: Vec<ChatMessage>,
     active_session_id: i64,
     sessions: Vec<SessionSummary>,
+    sessions_dirty: bool,
     selected_session_index: usize,
     session_modal_offset: usize,
     store: SessionStore,
@@ -77,6 +78,9 @@ struct AppState {
     model_selected_index: usize,
     model_loading: bool,
     model_error: Option<String>,
+    model_cache: Vec<String>,
+    model_cache_host: Option<String>,
+    model_cache_fetched_at: Option<i64>,
     theme_options: Vec<String>,
     theme_selected_index: usize,
     pending_delete_session_id: Option<i64>,
@@ -115,6 +119,7 @@ impl AppState {
             messages: init.messages,
             active_session_id: init.active_session_id,
             sessions: init.sessions,
+            sessions_dirty: false,
             selected_session_index: init.selected_session_index,
             session_modal_offset: 0,
             store: init.store,
@@ -133,6 +138,9 @@ impl AppState {
             model_selected_index: 0,
             model_loading: false,
             model_error: None,
+            model_cache: Vec::new(),
+            model_cache_host: None,
+            model_cache_fetched_at: None,
             theme_options: Vec::new(),
             theme_selected_index: 0,
             pending_delete_session_id: None,
@@ -1480,9 +1488,10 @@ fn submit_composer_message(app: &mut AppState) {
         handle,
         assistant_message_id,
     });
+    app.sessions_dirty = true;
     app.mode = InputMode::Normal;
     app.transcript_follow = true;
-    refresh_sessions(app, Some(app.active_session_id));
+    refresh_sessions(app, Some(app.active_session_id), false);
     app.status_message = "Sending request to Ollama...".to_string();
 }
 
@@ -1500,7 +1509,8 @@ fn create_fresh_session_for_landing_submit(app: &mut AppState) -> bool {
             app.model = app.default_model.clone();
             app.transcript_scroll = 0;
             app.transcript_follow = true;
-            refresh_sessions(app, Some(session_id));
+            app.sessions_dirty = true;
+            refresh_sessions(app, Some(session_id), false);
             true
         }
         Err(err) => {
@@ -1561,7 +1571,8 @@ fn maybe_auto_title_session(app: &mut AppState, first_user_message: &str) {
         app.status_message = format!("Failed to auto-title session: {err}");
         return;
     }
-    refresh_sessions(app, Some(app.active_session_id));
+    app.sessions_dirty = true;
+    refresh_sessions(app, Some(app.active_session_id), false);
     start_generated_session_title(app, app.active_session_id, &title, first_user_message);
 }
 
@@ -1804,7 +1815,7 @@ fn process_stream_events(app: &mut AppState) {
 
     if done {
         app.in_flight = None;
-        refresh_sessions(app, Some(app.active_session_id));
+        refresh_sessions(app, Some(app.active_session_id), false);
     }
 }
 
@@ -1817,9 +1828,12 @@ fn process_model_fetch_events(app: &mut AppState) {
     loop {
         match fetch.receiver.try_recv() {
             Ok(ModelFetchEvent::Loaded(models)) => {
-                app.model_options = models;
+                app.model_options = models.clone();
                 app.model_loading = false;
                 app.model_error = None;
+                app.model_cache = models;
+                app.model_cache_host = Some(app.host.clone());
+                app.model_cache_fetched_at = Some(unix_timestamp());
                 app.model_selected_index = app
                     .model_options
                     .iter()
@@ -1837,6 +1851,9 @@ fn process_model_fetch_events(app: &mut AppState) {
                 app.model_options.clear();
                 app.model_selected_index = 0;
                 app.model_error = Some(message.clone());
+                app.model_cache.clear();
+                app.model_cache_host = None;
+                app.model_cache_fetched_at = None;
                 app.status_message = format!("Model discovery error: {message}");
                 done = true;
             }
@@ -1876,7 +1893,8 @@ fn process_title_fetch_events(app: &mut AppState) {
                         Some(&cleaned),
                     ) {
                         Ok(true) => {
-                            refresh_sessions(app, Some(app.active_session_id));
+                            app.sessions_dirty = true;
+                            refresh_sessions(app, Some(app.active_session_id), false);
                             if session_id == app.active_session_id {
                                 app.status_message =
                                     format!("Auto-renamed session to \"{cleaned}\".");
@@ -2061,7 +2079,10 @@ fn adjust_session_modal_offset(app: &mut AppState, visible_sessions: usize) {
     app.session_modal_offset = offset.min(max_offset);
 }
 
-fn refresh_sessions(app: &mut AppState, preferred_session_id: Option<i64>) {
+fn refresh_sessions(app: &mut AppState, preferred_session_id: Option<i64>, force: bool) {
+    if !force && !app.sessions_dirty {
+        return;
+    }
     let current_selected_id = app
         .sessions
         .get(app.selected_session_index)
@@ -2073,6 +2094,7 @@ fn refresh_sessions(app: &mut AppState, preferred_session_id: Option<i64>) {
     match app.store.list_sessions() {
         Ok(sessions) => {
             app.sessions = sessions;
+            app.sessions_dirty = false;
             app.selected_session_index = app
                 .sessions
                 .iter()
@@ -2155,7 +2177,7 @@ fn switch_to_selected_session(app: &mut AppState) -> bool {
             app.composer_input.clear();
             app.transcript_scroll = 0;
             app.transcript_follow = true;
-            refresh_sessions(app, Some(selected.id));
+            refresh_sessions(app, Some(selected.id), false);
             if !app.status_message.starts_with("Switched to session #") {
                 app.status_message = format!("Switched to session #{}.", selected.id);
             }
@@ -2179,7 +2201,8 @@ fn activate_session_or_create(
         app.active_session_id = session_id;
         app.messages.clear();
         app.model = app.default_model.clone();
-        refresh_sessions(app, Some(session_id));
+        app.sessions_dirty = true;
+        refresh_sessions(app, Some(session_id), false);
         return Ok(session_id);
     }
 
@@ -2205,7 +2228,7 @@ fn activate_session_or_create(
     app.composer_input.clear();
     app.transcript_scroll = 0;
     app.transcript_follow = true;
-    refresh_sessions(app, Some(target_id));
+    refresh_sessions(app, Some(target_id), false);
     Ok(target_id)
 }
 
@@ -2228,7 +2251,7 @@ fn open_delete_confirmation_for_selected_session(app: &mut AppState) {
 }
 
 fn open_session_manager(app: &mut AppState) {
-    refresh_sessions(app, Some(app.active_session_id));
+    refresh_sessions(app, Some(app.active_session_id), true);
     app.mode = InputMode::SessionManager;
     app.session_rename_input.clear();
     app.delete_return_to_session_manager = false;
@@ -2256,7 +2279,8 @@ fn create_and_activate_session(app: &mut AppState) {
             app.composer_input.clear();
             app.transcript_scroll = 0;
             app.transcript_follow = true;
-            refresh_sessions(app, Some(session_id));
+            app.sessions_dirty = true;
+            refresh_sessions(app, Some(session_id), false);
             if !app.status_message.starts_with("Started new session #") {
                 app.status_message = format!("Started new session #{}.", session_id);
             }
@@ -2296,7 +2320,8 @@ fn submit_session_rename(app: &mut AppState) {
     };
     match app.store.rename_session(selected.id, title) {
         Ok(()) => {
-            refresh_sessions(app, Some(selected.id));
+            app.sessions_dirty = true;
+            refresh_sessions(app, Some(selected.id), false);
             app.mode = InputMode::SessionManager;
             app.session_rename_input.clear();
             app.status_message = format!("Renamed session #{}.", selected.id);
@@ -2322,6 +2347,7 @@ fn confirm_delete_session(app: &mut AppState) {
     let was_active = deleted_id == app.active_session_id;
     match app.store.delete_session(deleted_id) {
         Ok(()) => {
+            app.sessions_dirty = true;
             let preferred = if was_active {
                 None
             } else {
@@ -2376,10 +2402,14 @@ fn open_model_picker(app: &mut AppState) {
     };
     cancel_model_fetch(app);
     app.mode = InputMode::ModelSelect;
+    app.model_error = None;
+    if apply_cached_model_options(app) {
+        return;
+    }
+
     app.model_options.clear();
     app.model_selected_index = 0;
     app.model_loading = true;
-    app.model_error = None;
     app.status_message = "Loading models from Ollama...".to_string();
 
     let (tx, rx) = mpsc::unbounded_channel();
@@ -2400,6 +2430,38 @@ fn open_model_picker(app: &mut AppState) {
         receiver: rx,
         handle,
     });
+}
+
+const MODEL_CACHE_TTL_SECS: i64 = 60;
+
+fn apply_cached_model_options(app: &mut AppState) -> bool {
+    if !has_fresh_model_cache(app, unix_timestamp()) {
+        return false;
+    }
+
+    app.model_options = app.model_cache.clone();
+    app.model_loading = false;
+    app.model_selected_index = app
+        .model_options
+        .iter()
+        .position(|name| name == &app.model)
+        .unwrap_or(0);
+    app.status_message = if app.model_options.is_empty() {
+        "Loaded cached models: no models found.".to_string()
+    } else {
+        format!("Loaded {} cached model(s).", app.model_options.len())
+    };
+    true
+}
+
+fn has_fresh_model_cache(app: &AppState, now: i64) -> bool {
+    let Some(fetched_at) = app.model_cache_fetched_at else {
+        return false;
+    };
+    let Some(host) = app.model_cache_host.as_deref() else {
+        return false;
+    };
+    host == app.host && now.saturating_sub(fetched_at) < MODEL_CACHE_TTL_SECS
 }
 
 fn open_theme_picker(app: &mut AppState) {
@@ -2458,7 +2520,8 @@ fn apply_selected_model(app: &mut AppState) {
     {
         Ok(()) => {
             app.model = selected.clone();
-            refresh_sessions(app, Some(app.active_session_id));
+            app.sessions_dirty = true;
+            refresh_sessions(app, Some(app.active_session_id), false);
             app.mode = primary_mode_for_app(app);
             app.status_message = format!("Session model set to {selected}");
         }
@@ -3982,6 +4045,83 @@ mod tests {
             .last()
             .map(|message| message.content.clone())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn fresh_model_cache_matches_host_and_ttl() {
+        let db_path = temp_db_path("model-cache-freshness");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open");
+            let loaded = store.load_or_create_active_session().expect("load");
+            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+            let now = 1_000;
+
+            app.model_cache = vec!["qwen".to_string()];
+            app.model_cache_host = Some(app.host.clone());
+            app.model_cache_fetched_at = Some(now - 10);
+            assert!(has_fresh_model_cache(&app, now));
+
+            app.model_cache_fetched_at = Some(now - MODEL_CACHE_TTL_SECS);
+            assert!(!has_fresh_model_cache(&app, now));
+
+            app.model_cache_fetched_at = Some(now - 10);
+            app.model_cache_host = Some("http://other-host:11434".to_string());
+            assert!(!has_fresh_model_cache(&app, now));
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn apply_cached_model_options_uses_recent_cache() {
+        let db_path = temp_db_path("model-cache-apply");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open");
+            let loaded = store.load_or_create_active_session().expect("load");
+            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+
+            app.model = "llama3.2".to_string();
+            app.model_cache = vec!["qwen2.5-coder".to_string(), "llama3.2".to_string()];
+            app.model_cache_host = Some(app.host.clone());
+            app.model_cache_fetched_at = Some(unix_timestamp());
+
+            assert!(apply_cached_model_options(&mut app));
+            assert_eq!(
+                app.model_options,
+                vec!["qwen2.5-coder".to_string(), "llama3.2".to_string()]
+            );
+            assert_eq!(app.model_selected_index, 1);
+            assert_eq!(app.status_message, "Loaded 2 cached model(s).");
+            assert!(!app.model_loading);
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn refresh_sessions_skips_clean_state_unless_forced() {
+        let db_path = temp_db_path("session-refresh-dirty-flag");
+
+        {
+            let store = SessionStore::open(&db_path).expect("open");
+            let loaded = store.load_or_create_active_session().expect("load");
+            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+
+            assert_eq!(app.sessions.len(), 1);
+            app.store.create_session().expect("create hidden session");
+
+            let active_session_id = app.active_session_id;
+            refresh_sessions(&mut app, Some(active_session_id), false);
+            assert_eq!(app.sessions.len(), 1);
+
+            refresh_sessions(&mut app, Some(active_session_id), true);
+            assert_eq!(app.sessions.len(), 2);
+            assert!(!app.sessions_dirty);
+        }
+
+        let _ = fs::remove_file(&db_path);
     }
 
     #[test]
