@@ -13,6 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io;
@@ -49,6 +50,7 @@ pub fn run(
 struct AppState {
     mode: InputMode,
     host: String,
+    ollama_client: reqwest::Client,
     default_model: String,
     model: String,
     composer_input: String,
@@ -57,6 +59,7 @@ struct AppState {
     messages: Vec<ChatMessage>,
     active_session_id: i64,
     sessions: Vec<SessionSummary>,
+    sessions_dirty: bool,
     selected_session_index: usize,
     session_modal_offset: usize,
     store: SessionStore,
@@ -66,6 +69,7 @@ struct AppState {
     transcript_view_height: usize,
     transcript_max_scroll: u16,
     transcript_assistant_markers: Vec<u16>,
+    transcript_render_cache: HashMap<usize, CachedAssistantRender>,
     pending_g: bool,
     in_flight: Option<InFlightRequest>,
     model_fetch: Option<InFlightModelFetch>,
@@ -74,6 +78,9 @@ struct AppState {
     model_selected_index: usize,
     model_loading: bool,
     model_error: Option<String>,
+    model_cache: Vec<String>,
+    model_cache_host: Option<String>,
+    model_cache_fetched_at: Option<i64>,
     theme_options: Vec<String>,
     theme_selected_index: usize,
     pending_delete_session_id: Option<i64>,
@@ -86,6 +93,7 @@ struct AppState {
 
 struct AppStateInit {
     host: String,
+    ollama_client: reqwest::Client,
     model: String,
     default_model: String,
     theme_key: String,
@@ -102,6 +110,7 @@ impl AppState {
         Self {
             mode: InputMode::Normal,
             host: init.host,
+            ollama_client: init.ollama_client,
             default_model: init.default_model,
             model: init.model,
             composer_input: String::new(),
@@ -110,6 +119,7 @@ impl AppState {
             messages: init.messages,
             active_session_id: init.active_session_id,
             sessions: init.sessions,
+            sessions_dirty: false,
             selected_session_index: init.selected_session_index,
             session_modal_offset: 0,
             store: init.store,
@@ -119,6 +129,7 @@ impl AppState {
             transcript_view_height: 1,
             transcript_max_scroll: 0,
             transcript_assistant_markers: Vec::new(),
+            transcript_render_cache: HashMap::new(),
             pending_g: false,
             in_flight: None,
             model_fetch: None,
@@ -127,6 +138,9 @@ impl AppState {
             model_selected_index: 0,
             model_loading: false,
             model_error: None,
+            model_cache: Vec::new(),
+            model_cache_host: None,
+            model_cache_fetched_at: None,
             theme_options: Vec::new(),
             theme_selected_index: 0,
             pending_delete_session_id: None,
@@ -491,6 +505,7 @@ fn run_loop(
         .unwrap_or(0);
     let mut app = AppState::new(AppStateInit {
         host: host.to_string(),
+        ollama_client: reqwest::Client::new(),
         model: active_model,
         default_model: model.to_string(),
         theme_key: theme_key.to_string(),
@@ -1054,12 +1069,7 @@ fn render_main_panes(
     });
     app.transcript_view_width = transcript_inner.width.max(1) as usize;
     app.transcript_view_height = transcript_inner.height.max(1) as usize;
-    let transcript_render = transcript_lines(
-        &app.messages,
-        app.is_busy(),
-        theme,
-        app.transcript_view_width,
-    );
+    let transcript_render = transcript_lines_cached(app, app.transcript_view_width);
     app.transcript_assistant_markers = transcript_render.assistant_markers;
     let conversation_title = conversation_header_title(app);
     let mut transcript_title_spans = vec![Span::styled(
@@ -1463,9 +1473,12 @@ fn submit_composer_message(app: &mut AppState) {
     let (tx, rx) = mpsc::unbounded_channel();
     let host = app.host.clone();
     let model = app.model.clone();
+    let client = app.ollama_client.clone();
 
     let handle = tokio::spawn(async move {
-        if let Err(err) = stream_ollama_chat(&host, &model, request_messages, tx.clone()).await {
+        if let Err(err) =
+            stream_ollama_chat(&client, &host, &model, request_messages, tx.clone()).await
+        {
             let _ = tx.send(StreamEvent::Error(err.to_string()));
         }
     });
@@ -1475,9 +1488,10 @@ fn submit_composer_message(app: &mut AppState) {
         handle,
         assistant_message_id,
     });
+    app.sessions_dirty = true;
     app.mode = InputMode::Normal;
     app.transcript_follow = true;
-    refresh_sessions(app, Some(app.active_session_id));
+    refresh_sessions(app, Some(app.active_session_id), false);
     app.status_message = "Sending request to Ollama...".to_string();
 }
 
@@ -1495,7 +1509,8 @@ fn create_fresh_session_for_landing_submit(app: &mut AppState) -> bool {
             app.model = app.default_model.clone();
             app.transcript_scroll = 0;
             app.transcript_follow = true;
-            refresh_sessions(app, Some(session_id));
+            app.sessions_dirty = true;
+            refresh_sessions(app, Some(session_id), false);
             true
         }
         Err(err) => {
@@ -1556,7 +1571,8 @@ fn maybe_auto_title_session(app: &mut AppState, first_user_message: &str) {
         app.status_message = format!("Failed to auto-title session: {err}");
         return;
     }
-    refresh_sessions(app, Some(app.active_session_id));
+    app.sessions_dirty = true;
+    refresh_sessions(app, Some(app.active_session_id), false);
     start_generated_session_title(app, app.active_session_id, &title, first_user_message);
 }
 
@@ -1572,11 +1588,12 @@ fn start_generated_session_title(
     let (tx, rx) = mpsc::unbounded_channel();
     let host = app.host.clone();
     let model = app.model.clone();
+    let client = app.ollama_client.clone();
     let expected_title = expected_title.to_string();
     let first_user_message = first_user_message.to_string();
     let handle = runtime.spawn(async move {
         if let Ok(generated_title) =
-            generate_session_title(&host, &model, &first_user_message).await
+            generate_session_title(&client, &host, &model, &first_user_message).await
         {
             let _ = tx.send(TitleFetchEvent::Generated {
                 session_id,
@@ -1746,7 +1763,7 @@ fn format_title_token(token: &str) -> String {
 
 fn process_stream_events(app: &mut AppState) {
     let mut done = false;
-    let mut assistant_changed = false;
+    let mut should_persist = false;
     let assistant_message_id = {
         let Some(in_flight) = app.in_flight.as_mut() else {
             return;
@@ -1760,12 +1777,12 @@ fn process_stream_events(app: &mut AppState) {
                         && last.role == "assistant"
                     {
                         last.content.push_str(&content);
-                        assistant_changed = true;
                     }
                     app.status_message = "Streaming response...".to_string();
                 }
                 Ok(StreamEvent::Done) => {
                     app.status_message = "Response complete.".to_string();
+                    should_persist = true;
                     done = true;
                     break;
                 }
@@ -1775,14 +1792,15 @@ fn process_stream_events(app: &mut AppState) {
                         && last.content.trim().is_empty()
                     {
                         last.content = format!("[error] {message}");
-                        assistant_changed = true;
                     }
                     app.status_message = format!("Request error: {message}");
+                    should_persist = true;
                     done = true;
                     break;
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    should_persist = true;
                     done = true;
                     break;
                 }
@@ -1791,13 +1809,13 @@ fn process_stream_events(app: &mut AppState) {
         assistant_message_id
     };
 
-    if assistant_changed {
+    if should_persist {
         persist_last_assistant_message(app, assistant_message_id);
     }
 
     if done {
         app.in_flight = None;
-        refresh_sessions(app, Some(app.active_session_id));
+        refresh_sessions(app, Some(app.active_session_id), false);
     }
 }
 
@@ -1810,9 +1828,12 @@ fn process_model_fetch_events(app: &mut AppState) {
     loop {
         match fetch.receiver.try_recv() {
             Ok(ModelFetchEvent::Loaded(models)) => {
-                app.model_options = models;
+                app.model_options = models.clone();
                 app.model_loading = false;
                 app.model_error = None;
+                app.model_cache = models;
+                app.model_cache_host = Some(app.host.clone());
+                app.model_cache_fetched_at = Some(unix_timestamp());
                 app.model_selected_index = app
                     .model_options
                     .iter()
@@ -1830,6 +1851,9 @@ fn process_model_fetch_events(app: &mut AppState) {
                 app.model_options.clear();
                 app.model_selected_index = 0;
                 app.model_error = Some(message.clone());
+                app.model_cache.clear();
+                app.model_cache_host = None;
+                app.model_cache_fetched_at = None;
                 app.status_message = format!("Model discovery error: {message}");
                 done = true;
             }
@@ -1869,7 +1893,8 @@ fn process_title_fetch_events(app: &mut AppState) {
                         Some(&cleaned),
                     ) {
                         Ok(true) => {
-                            refresh_sessions(app, Some(app.active_session_id));
+                            app.sessions_dirty = true;
+                            refresh_sessions(app, Some(app.active_session_id), false);
                             if session_id == app.active_session_id {
                                 app.status_message =
                                     format!("Auto-renamed session to \"{cleaned}\".");
@@ -1904,17 +1929,13 @@ fn process_title_fetch_events(app: &mut AppState) {
 fn cancel_request(app: &mut AppState, silent: bool) {
     if let Some(in_flight) = app.in_flight.take() {
         in_flight.handle.abort();
-        let mut assistant_changed = false;
         if let Some(last) = app.messages.last_mut()
             && last.role == "assistant"
             && last.content.trim().is_empty()
         {
             last.content = "[cancelled]".to_string();
-            assistant_changed = true;
         }
-        if assistant_changed {
-            persist_last_assistant_message(app, in_flight.assistant_message_id);
-        }
+        persist_last_assistant_message(app, in_flight.assistant_message_id);
         if !silent {
             app.status_message = "Streaming cancelled.".to_string();
         }
@@ -2058,7 +2079,10 @@ fn adjust_session_modal_offset(app: &mut AppState, visible_sessions: usize) {
     app.session_modal_offset = offset.min(max_offset);
 }
 
-fn refresh_sessions(app: &mut AppState, preferred_session_id: Option<i64>) {
+fn refresh_sessions(app: &mut AppState, preferred_session_id: Option<i64>, force: bool) {
+    if !force && !app.sessions_dirty {
+        return;
+    }
     let current_selected_id = app
         .sessions
         .get(app.selected_session_index)
@@ -2070,6 +2094,7 @@ fn refresh_sessions(app: &mut AppState, preferred_session_id: Option<i64>) {
     match app.store.list_sessions() {
         Ok(sessions) => {
             app.sessions = sessions;
+            app.sessions_dirty = false;
             app.selected_session_index = app
                 .sessions
                 .iter()
@@ -2152,7 +2177,7 @@ fn switch_to_selected_session(app: &mut AppState) -> bool {
             app.composer_input.clear();
             app.transcript_scroll = 0;
             app.transcript_follow = true;
-            refresh_sessions(app, Some(selected.id));
+            refresh_sessions(app, Some(selected.id), false);
             if !app.status_message.starts_with("Switched to session #") {
                 app.status_message = format!("Switched to session #{}.", selected.id);
             }
@@ -2176,7 +2201,8 @@ fn activate_session_or_create(
         app.active_session_id = session_id;
         app.messages.clear();
         app.model = app.default_model.clone();
-        refresh_sessions(app, Some(session_id));
+        app.sessions_dirty = true;
+        refresh_sessions(app, Some(session_id), false);
         return Ok(session_id);
     }
 
@@ -2202,7 +2228,7 @@ fn activate_session_or_create(
     app.composer_input.clear();
     app.transcript_scroll = 0;
     app.transcript_follow = true;
-    refresh_sessions(app, Some(target_id));
+    refresh_sessions(app, Some(target_id), false);
     Ok(target_id)
 }
 
@@ -2225,7 +2251,7 @@ fn open_delete_confirmation_for_selected_session(app: &mut AppState) {
 }
 
 fn open_session_manager(app: &mut AppState) {
-    refresh_sessions(app, Some(app.active_session_id));
+    refresh_sessions(app, Some(app.active_session_id), true);
     app.mode = InputMode::SessionManager;
     app.session_rename_input.clear();
     app.delete_return_to_session_manager = false;
@@ -2253,7 +2279,8 @@ fn create_and_activate_session(app: &mut AppState) {
             app.composer_input.clear();
             app.transcript_scroll = 0;
             app.transcript_follow = true;
-            refresh_sessions(app, Some(session_id));
+            app.sessions_dirty = true;
+            refresh_sessions(app, Some(session_id), false);
             if !app.status_message.starts_with("Started new session #") {
                 app.status_message = format!("Started new session #{}.", session_id);
             }
@@ -2293,7 +2320,8 @@ fn submit_session_rename(app: &mut AppState) {
     };
     match app.store.rename_session(selected.id, title) {
         Ok(()) => {
-            refresh_sessions(app, Some(selected.id));
+            app.sessions_dirty = true;
+            refresh_sessions(app, Some(selected.id), false);
             app.mode = InputMode::SessionManager;
             app.session_rename_input.clear();
             app.status_message = format!("Renamed session #{}.", selected.id);
@@ -2319,6 +2347,7 @@ fn confirm_delete_session(app: &mut AppState) {
     let was_active = deleted_id == app.active_session_id;
     match app.store.delete_session(deleted_id) {
         Ok(()) => {
+            app.sessions_dirty = true;
             let preferred = if was_active {
                 None
             } else {
@@ -2373,16 +2402,21 @@ fn open_model_picker(app: &mut AppState) {
     };
     cancel_model_fetch(app);
     app.mode = InputMode::ModelSelect;
+    app.model_error = None;
+    if apply_cached_model_options(app) {
+        return;
+    }
+
     app.model_options.clear();
     app.model_selected_index = 0;
     app.model_loading = true;
-    app.model_error = None;
     app.status_message = "Loading models from Ollama...".to_string();
 
     let (tx, rx) = mpsc::unbounded_channel();
     let host = app.host.clone();
+    let client = app.ollama_client.clone();
     let handle = runtime.spawn(async move {
-        match fetch_ollama_models(&host).await {
+        match fetch_ollama_models(&client, &host).await {
             Ok(models) => {
                 let _ = tx.send(ModelFetchEvent::Loaded(models));
             }
@@ -2396,6 +2430,38 @@ fn open_model_picker(app: &mut AppState) {
         receiver: rx,
         handle,
     });
+}
+
+const MODEL_CACHE_TTL_SECS: i64 = 60;
+
+fn apply_cached_model_options(app: &mut AppState) -> bool {
+    if !has_fresh_model_cache(app, unix_timestamp()) {
+        return false;
+    }
+
+    app.model_options = app.model_cache.clone();
+    app.model_loading = false;
+    app.model_selected_index = app
+        .model_options
+        .iter()
+        .position(|name| name == &app.model)
+        .unwrap_or(0);
+    app.status_message = if app.model_options.is_empty() {
+        "Loaded cached models: no models found.".to_string()
+    } else {
+        format!("Loaded {} cached model(s).", app.model_options.len())
+    };
+    true
+}
+
+fn has_fresh_model_cache(app: &AppState, now: i64) -> bool {
+    let Some(fetched_at) = app.model_cache_fetched_at else {
+        return false;
+    };
+    let Some(host) = app.model_cache_host.as_deref() else {
+        return false;
+    };
+    host == app.host && now.saturating_sub(fetched_at) < MODEL_CACHE_TTL_SECS
 }
 
 fn open_theme_picker(app: &mut AppState) {
@@ -2454,7 +2520,8 @@ fn apply_selected_model(app: &mut AppState) {
     {
         Ok(()) => {
             app.model = selected.clone();
-            refresh_sessions(app, Some(app.active_session_id));
+            app.sessions_dirty = true;
+            refresh_sessions(app, Some(app.active_session_id), false);
             app.mode = primary_mode_for_app(app);
             app.status_message = format!("Session model set to {selected}");
         }
@@ -2838,6 +2905,15 @@ struct TranscriptRender {
     assistant_markers: Vec<u16>,
 }
 
+#[derive(Clone)]
+struct CachedAssistantRender {
+    content: String,
+    theme_key: String,
+    view_width: usize,
+    rows: Vec<Line<'static>>,
+    assistant_marker_offset: Option<u16>,
+}
+
 struct MessageRenderCtx<'a> {
     label: &'a str,
     label_color: Color,
@@ -2850,6 +2926,7 @@ struct MessageRenderCtx<'a> {
     theme: ThemePalette,
 }
 
+#[cfg(test)]
 fn transcript_lines(
     messages: &[ChatMessage],
     is_busy: bool,
@@ -2869,116 +2946,208 @@ fn transcript_lines(
     let mut rows = Vec::new();
     let mut assistant_markers = Vec::new();
     for (idx, message) in messages.iter().enumerate() {
-        let (label, label_color) = match message.role.as_str() {
-            "user" => ("You", theme.user),
-            "assistant" => ("Assistant", theme.assistant),
-            _ => ("System", theme.system),
-        };
-        let is_assistant = message.role == "assistant";
-        let ctx = MessageRenderCtx {
-            label,
-            label_color,
-            is_assistant,
-            wrap_pad: "  ",
-            text_style: Style::default().fg(theme.text),
-            code_style: Style::default().fg(theme.text).bg(theme.surface_alt),
-            rail_style: Style::default()
-                .fg(theme.title_meta)
-                .bg(theme.highlight_low),
-            gutter_style: Style::default()
-                .fg(theme.title_value_alt)
-                .bg(theme.surface_alt),
-            theme,
-        };
-
-        if ctx.is_assistant {
-            push_assistant_separator(&mut rows, &mut assistant_markers, theme);
+        let block = render_message_block(message, is_busy, idx, messages.len(), theme);
+        if let Some(offset) = block.assistant_marker_offset {
+            assistant_markers.push((rows.len() as u16).saturating_add(offset));
         }
-
-        let content = message_content_for_render(message, is_busy, idx, messages.len());
-        let mut in_code_block = false;
-        let mut code_highlighter: Option<HighlightLines<'static>> = None;
-        let mut code_lines: Vec<String> = Vec::new();
-        let mut wrote_any = false;
-        let mut wrote_first_content_line = false;
-
-        for line in content.lines() {
-            let is_fence = line.trim_start().starts_with("```");
-            if is_fence {
-                if !in_code_block {
-                    let lang = line.trim_start().trim_start_matches("```").trim();
-                    let code_label = if lang.is_empty() {
-                        "code".to_string()
-                    } else {
-                        format!("code: {lang}")
-                    };
-                    rows.push(Line::from(vec![
-                        Span::styled("  ╭─ ".to_string(), ctx.rail_style),
-                        Span::styled(code_label, ctx.rail_style.add_modifier(Modifier::BOLD)),
-                    ]));
-                    code_highlighter = build_code_highlighter(
-                        if lang.is_empty() { None } else { Some(lang) },
-                        theme,
-                    );
-                    code_lines.clear();
-                    in_code_block = true;
-                    wrote_any = true;
-                } else {
-                    flush_code_block(
-                        &mut rows,
-                        &code_lines,
-                        &mut code_highlighter,
-                        &mut wrote_first_content_line,
-                        &ctx,
-                    );
-                    code_lines.clear();
-                    code_highlighter = None;
-                    in_code_block = false;
-                    wrote_any = true;
-                }
-                continue;
-            }
-
-            if in_code_block {
-                code_lines.push(line.to_string());
-                wrote_any = true;
-                continue;
-            }
-
-            if ctx.is_assistant {
-                rows.push(Line::from(markdown_line_spans(line, ctx.theme)));
-                wrote_first_content_line = true;
-                wrote_any = true;
-                continue;
-            }
-
-            push_non_assistant_text_line(&mut rows, line, &mut wrote_first_content_line, &ctx);
-            wrote_any = true;
-        }
-
-        if in_code_block {
-            flush_code_block(
-                &mut rows,
-                &code_lines,
-                &mut code_highlighter,
-                &mut wrote_first_content_line,
-                &ctx,
-            );
-        }
-
-        if !wrote_any && !ctx.is_assistant {
-            rows.push(Line::styled(
-                format!("{}:", ctx.label),
-                Style::default()
-                    .fg(ctx.label_color)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        rows.push(Line::raw(""));
+        rows.extend(block.rows);
     }
     TranscriptRender {
         lines: rows,
         assistant_markers,
+    }
+}
+
+fn transcript_lines_cached(app: &mut AppState, view_width: usize) -> TranscriptRender {
+    let messages = &app.messages;
+    let theme = app.theme;
+    if messages.is_empty() {
+        return TranscriptRender {
+            lines: vec![Line::styled(
+                "No messages yet. Press i, type, then Enter.".to_string(),
+                Style::default().fg(theme.muted),
+            )],
+            assistant_markers: Vec::new(),
+        };
+    }
+
+    app.transcript_render_cache
+        .retain(|idx, _| *idx < messages.len());
+
+    let mut rows = Vec::new();
+    let mut assistant_markers = Vec::new();
+    for (idx, message) in messages.iter().enumerate() {
+        let content = message_content_for_render(message, app.is_busy(), idx, messages.len());
+        let cached_rows = if message.role == "assistant" {
+            if let Some(cached) = app.transcript_render_cache.get(&idx) {
+                if cached.content == content
+                    && cached.theme_key == app.theme_key
+                    && cached.view_width == view_width
+                {
+                    Some((cached.rows.clone(), cached.assistant_marker_offset))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let (block_rows, assistant_marker_offset) = if let Some(cached) = cached_rows {
+            cached
+        } else {
+            let block = render_message_block(message, app.is_busy(), idx, messages.len(), theme);
+            if message.role == "assistant" {
+                app.transcript_render_cache.insert(
+                    idx,
+                    CachedAssistantRender {
+                        content,
+                        theme_key: app.theme_key.clone(),
+                        view_width,
+                        rows: block.rows.clone(),
+                        assistant_marker_offset: block.assistant_marker_offset,
+                    },
+                );
+            }
+            (block.rows, block.assistant_marker_offset)
+        };
+
+        if let Some(offset) = assistant_marker_offset {
+            assistant_markers.push((rows.len() as u16).saturating_add(offset));
+        }
+        rows.extend(block_rows);
+    }
+
+    TranscriptRender {
+        lines: rows,
+        assistant_markers,
+    }
+}
+
+struct MessageRenderBlock {
+    rows: Vec<Line<'static>>,
+    assistant_marker_offset: Option<u16>,
+}
+
+fn render_message_block(
+    message: &ChatMessage,
+    is_busy: bool,
+    idx: usize,
+    total_messages: usize,
+    theme: ThemePalette,
+) -> MessageRenderBlock {
+    let (label, label_color) = match message.role.as_str() {
+        "user" => ("You", theme.user),
+        "assistant" => ("Assistant", theme.assistant),
+        _ => ("System", theme.system),
+    };
+    let is_assistant = message.role == "assistant";
+    let ctx = MessageRenderCtx {
+        label,
+        label_color,
+        is_assistant,
+        wrap_pad: "  ",
+        text_style: Style::default().fg(theme.text),
+        code_style: Style::default().fg(theme.text).bg(theme.surface_alt),
+        rail_style: Style::default()
+            .fg(theme.title_meta)
+            .bg(theme.highlight_low),
+        gutter_style: Style::default()
+            .fg(theme.title_value_alt)
+            .bg(theme.surface_alt),
+        theme,
+    };
+
+    let mut rows = Vec::new();
+    let mut assistant_markers = Vec::new();
+    if ctx.is_assistant {
+        push_assistant_separator(&mut rows, &mut assistant_markers, theme);
+    }
+
+    let content = message_content_for_render(message, is_busy, idx, total_messages);
+    let mut in_code_block = false;
+    let mut code_highlighter: Option<HighlightLines<'static>> = None;
+    let mut code_lines: Vec<String> = Vec::new();
+    let mut wrote_any = false;
+    let mut wrote_first_content_line = false;
+
+    for line in content.lines() {
+        let is_fence = line.trim_start().starts_with("```");
+        if is_fence {
+            if !in_code_block {
+                let lang = line.trim_start().trim_start_matches("```").trim();
+                let code_label = if lang.is_empty() {
+                    "code".to_string()
+                } else {
+                    format!("code: {lang}")
+                };
+                rows.push(Line::from(vec![
+                    Span::styled("  ╭─ ".to_string(), ctx.rail_style),
+                    Span::styled(code_label, ctx.rail_style.add_modifier(Modifier::BOLD)),
+                ]));
+                code_highlighter =
+                    build_code_highlighter(if lang.is_empty() { None } else { Some(lang) }, theme);
+                code_lines.clear();
+                in_code_block = true;
+                wrote_any = true;
+            } else {
+                flush_code_block(
+                    &mut rows,
+                    &code_lines,
+                    &mut code_highlighter,
+                    &mut wrote_first_content_line,
+                    &ctx,
+                );
+                code_lines.clear();
+                code_highlighter = None;
+                in_code_block = false;
+                wrote_any = true;
+            }
+            continue;
+        }
+
+        if in_code_block {
+            code_lines.push(line.to_string());
+            wrote_any = true;
+            continue;
+        }
+
+        if ctx.is_assistant {
+            rows.push(Line::from(markdown_line_spans(line, ctx.theme)));
+            wrote_first_content_line = true;
+            wrote_any = true;
+            continue;
+        }
+
+        push_non_assistant_text_line(&mut rows, line, &mut wrote_first_content_line, &ctx);
+        wrote_any = true;
+    }
+
+    if in_code_block {
+        flush_code_block(
+            &mut rows,
+            &code_lines,
+            &mut code_highlighter,
+            &mut wrote_first_content_line,
+            &ctx,
+        );
+    }
+
+    if !wrote_any && !ctx.is_assistant {
+        rows.push(Line::styled(
+            format!("{}:", ctx.label),
+            Style::default()
+                .fg(ctx.label_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    rows.push(Line::raw(""));
+
+    MessageRenderBlock {
+        rows,
+        assistant_marker_offset: assistant_markers.first().copied(),
     }
 }
 
@@ -3475,13 +3644,13 @@ struct OllamaGenerateResponse {
 }
 
 async fn stream_ollama_chat(
+    client: &reqwest::Client,
     host: &str,
     model: &str,
     messages: Vec<ChatMessage>,
     tx: mpsc::UnboundedSender<StreamEvent>,
 ) -> Result<()> {
     let url = format!("{}/api/chat", host.trim_end_matches('/'));
-    let client = reqwest::Client::new();
     let request = OllamaChatRequest {
         model: model.to_string(),
         messages,
@@ -3532,7 +3701,7 @@ async fn stream_ollama_chat(
     Ok(())
 }
 
-async fn fetch_ollama_models(host: &str) -> Result<Vec<String>> {
+async fn fetch_ollama_models(client: &reqwest::Client, host: &str) -> Result<Vec<String>> {
     #[derive(Deserialize)]
     struct OllamaModel {
         name: String,
@@ -3544,7 +3713,6 @@ async fn fetch_ollama_models(host: &str) -> Result<Vec<String>> {
     }
 
     let url = format!("{}/api/tags", host.trim_end_matches('/'));
-    let client = reqwest::Client::new();
     let resp = client
         .get(url)
         .send()
@@ -3570,6 +3738,7 @@ async fn fetch_ollama_models(host: &str) -> Result<Vec<String>> {
 }
 
 async fn generate_session_title(
+    client: &reqwest::Client,
     host: &str,
     model: &str,
     first_user_message: &str,
@@ -3584,7 +3753,6 @@ async fn generate_session_title(
         stream: false,
     };
     let url = format!("{}/api/generate", host.trim_end_matches('/'));
-    let client = reqwest::Client::new();
     let resp = client
         .post(url)
         .json(&request)
@@ -3803,542 +3971,4 @@ fn tui_config_path() -> Result<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::theme::{DEFAULT_THEME_KEY, default_theme, resolve_theme};
-    use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_db_path(test_name: &str) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("rosie-{test_name}-{ts}-{n}.sqlite3"))
-    }
-
-    fn build_app_from_store(
-        store: SessionStore,
-        active_session_id: i64,
-        messages: Vec<ChatMessage>,
-    ) -> AppState {
-        let sessions = store.list_sessions().expect("list sessions");
-        let selected_session_index = sessions
-            .iter()
-            .position(|session| session.id == active_session_id)
-            .unwrap_or(0);
-        let resolved = default_theme();
-        AppState::new(AppStateInit {
-            host: "http://localhost:11434".to_string(),
-            model: "test-model".to_string(),
-            default_model: "test-model".to_string(),
-            theme_key: resolved.key,
-            theme: resolved.palette,
-            store,
-            active_session_id,
-            messages,
-            sessions,
-            selected_session_index,
-        })
-    }
-
-    fn line_text(line: &Line<'_>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>()
-    }
-
-    fn render_lines_text(messages: Vec<ChatMessage>, is_busy: bool) -> (Vec<String>, Vec<u16>) {
-        let theme = default_theme().palette;
-        let render = transcript_lines(&messages, is_busy, theme, 80);
-        let lines = render.lines.iter().map(line_text).collect::<Vec<_>>();
-        (lines, render.assistant_markers)
-    }
-
-    #[test]
-    fn persists_messages_across_restart_and_deletes_selected_session_with_confirmation() {
-        let db_path = temp_db_path("persist-switch-delete");
-        let (session_one, session_two);
-
-        {
-            let store = SessionStore::open(&db_path).expect("open store");
-            session_one = store
-                .load_or_create_active_session()
-                .expect("load or create")
-                .session_id;
-            store
-                .insert_message(session_one, "user", "hello from session one")
-                .expect("insert user");
-            store
-                .insert_message(session_one, "assistant", "response one")
-                .expect("insert assistant");
-
-            session_two = store.create_session().expect("create second session");
-            store
-                .insert_message(session_two, "user", "hello from session two")
-                .expect("insert second session message");
-            store
-                .set_last_active_session_id(session_two)
-                .expect("persist active session");
-        }
-
-        {
-            let store = SessionStore::open(&db_path).expect("reopen store");
-            let loaded = store.load_or_create_active_session().expect("load session");
-            assert_eq!(loaded.session_id, session_two);
-
-            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
-
-            app.selected_session_index = app
-                .sessions
-                .iter()
-                .position(|session| session.id == session_one)
-                .expect("session one in list");
-            switch_to_selected_session(&mut app);
-
-            assert_eq!(app.active_session_id, session_one);
-            assert!(
-                app.messages
-                    .iter()
-                    .any(|m| m.content.contains("hello from session one"))
-            );
-
-            app.selected_session_index = app
-                .sessions
-                .iter()
-                .position(|session| session.id == session_two)
-                .expect("session two in list");
-            open_delete_confirmation_for_selected_session(&mut app);
-            assert!(matches!(app.mode, InputMode::ConfirmDelete));
-            assert_eq!(app.pending_delete_session_id, Some(session_two));
-
-            confirm_delete_session(&mut app);
-
-            assert!(matches!(app.mode, InputMode::Normal));
-            assert_eq!(app.active_session_id, session_one);
-            assert!(app.sessions.iter().all(|session| session.id != session_two));
-        }
-
-        let _ = fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn session_command_opens_manager_and_help_works() {
-        let db_path = temp_db_path("palette-delete");
-
-        {
-            let store = SessionStore::open(&db_path).expect("open store");
-            let first = store
-                .load_or_create_active_session()
-                .expect("load")
-                .session_id;
-            let second = store.create_session().expect("create second session");
-            store
-                .insert_message(first, "user", "first")
-                .expect("insert first");
-            store
-                .insert_message(second, "user", "second")
-                .expect("insert second");
-        }
-
-        {
-            let store = SessionStore::open(&db_path).expect("reopen store");
-            let loaded = store.load_or_create_active_session().expect("load active");
-            let original_active = loaded.session_id;
-            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
-
-            app.command_input = ":session".to_string();
-            assert!(!run_palette_command(&mut app));
-            assert!(matches!(app.mode, InputMode::SessionManager));
-
-            open_delete_confirmation_for_selected_session(&mut app);
-            assert!(matches!(app.mode, InputMode::ConfirmDelete));
-            assert_eq!(app.pending_delete_session_id, Some(original_active));
-
-            confirm_delete_session(&mut app);
-            assert!(matches!(app.mode, InputMode::SessionManager));
-            assert_ne!(app.active_session_id, original_active);
-            assert!(
-                app.sessions
-                    .iter()
-                    .all(|session| session.id != original_active)
-            );
-
-            app.command_input = ":help".to_string();
-            assert!(!run_palette_command(&mut app));
-            assert!(matches!(app.mode, InputMode::Help));
-            assert_eq!(app.status_message, "Help open.");
-        }
-
-        let _ = fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn command_palette_picklist_behaves_as_expected() {
-        let db_path = temp_db_path("palette-picklist");
-
-        {
-            let store = SessionStore::open(&db_path).expect("open store");
-            let loaded = store.load_or_create_active_session().expect("load");
-            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
-            app.mode = InputMode::CommandPalette;
-            app.command_selected_index = 1; // session
-            assert!(!run_palette_selected_command(&mut app));
-            assert!(matches!(app.mode, InputMode::SessionManager));
-
-            app.mode = InputMode::CommandPalette;
-            app.command_input = "he".to_string();
-            app.command_selected_index = 0;
-            assert!(!run_palette_selected_command(&mut app));
-            assert!(matches!(app.mode, InputMode::Help));
-        }
-
-        let _ = fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn theme_command_switches_theme_in_memory() {
-        let db_path = temp_db_path("palette-theme");
-        let config_dir = config_dir_from_env().expect("config dir");
-        let first = DEFAULT_THEME_KEY;
-        let second = if resolve_theme("rose-pine-moon", &config_dir).is_ok() {
-            "rose-pine-moon"
-        } else if resolve_theme("rose-pine-dawn", &config_dir).is_ok() {
-            "rose-pine-dawn"
-        } else {
-            DEFAULT_THEME_KEY
-        };
-
-        {
-            let store = SessionStore::open(&db_path).expect("open store");
-            let loaded = store.load_or_create_active_session().expect("load");
-            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
-            let first_resolved = resolve_theme(first, &config_dir).expect("resolve first theme");
-            let second_resolved = resolve_theme(second, &config_dir).expect("resolve second theme");
-
-            app.command_input = format!(":theme {first}");
-            assert!(!run_palette_command(&mut app));
-            assert_eq!(app.theme_key, first_resolved.key);
-
-            app.command_input = format!(":theme {second}");
-            assert!(!run_palette_command(&mut app));
-            assert_eq!(app.theme_key, second_resolved.key);
-        }
-
-        let _ = fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn session_model_is_persisted_and_restored_on_switch() {
-        let db_path = temp_db_path("session-model-switch");
-        let (session_one, session_two);
-
-        {
-            let store = SessionStore::open(&db_path).expect("open store");
-            session_one = store
-                .load_or_create_active_session()
-                .expect("load")
-                .session_id;
-            session_two = store.create_session().expect("create");
-            store
-                .set_session_model(session_one, "qwen2.5-coder")
-                .expect("set model one");
-            store
-                .set_session_model(session_two, "llama3.2")
-                .expect("set model two");
-        }
-
-        {
-            let store = SessionStore::open(&db_path).expect("reopen");
-            let loaded = store.load_or_create_active_session().expect("load active");
-            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
-
-            app.selected_session_index = app
-                .sessions
-                .iter()
-                .position(|session| session.id == session_two)
-                .expect("find session two");
-            switch_to_selected_session(&mut app);
-            assert_eq!(app.model, "llama3.2");
-
-            app.selected_session_index = app
-                .sessions
-                .iter()
-                .position(|session| session.id == session_one)
-                .expect("find session one");
-            switch_to_selected_session(&mut app);
-            assert_eq!(app.model, "qwen2.5-coder");
-        }
-
-        let _ = fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn sessions_list_is_ordered_by_id_descending() {
-        let db_path = temp_db_path("session-order");
-
-        {
-            let store = SessionStore::open(&db_path).expect("open");
-            let first = store
-                .load_or_create_active_session()
-                .expect("load")
-                .session_id;
-            let second = store.create_session().expect("second");
-            let third = store.create_session().expect("third");
-            let list = store.list_sessions().expect("list");
-            let ids: Vec<i64> = list.into_iter().map(|session| session.id).collect();
-            assert_eq!(ids, vec![third, second, first]);
-        }
-
-        let _ = fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn startup_uses_last_active_session_or_creates_when_empty() {
-        let db_path = temp_db_path("startup-last-active");
-
-        {
-            let store = SessionStore::open(&db_path).expect("open");
-            let first = store
-                .load_or_create_active_session()
-                .expect("load/create first")
-                .session_id;
-            let second = store.create_session().expect("create second");
-
-            store
-                .set_last_active_session_id(second)
-                .expect("persist second active");
-            let loaded = store.load_or_create_active_session().expect("load second");
-            assert_eq!(loaded.session_id, second);
-
-            store
-                .set_last_active_session_id(first)
-                .expect("persist first active");
-            let loaded = store.load_or_create_active_session().expect("load first");
-            assert_eq!(loaded.session_id, first);
-        }
-
-        {
-            let empty_db_path = temp_db_path("startup-empty-creates");
-            let store = SessionStore::open(&empty_db_path).expect("open empty");
-            let loaded = store
-                .load_or_create_active_session()
-                .expect("create on empty");
-            assert!(loaded.session_id > 0);
-            let list = store.list_sessions().expect("list");
-            assert_eq!(list.len(), 1);
-            let _ = fs::remove_file(&empty_db_path);
-        }
-
-        let _ = fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn landing_submit_creates_new_session_instead_of_reusing_loaded_one() {
-        let db_path = temp_db_path("landing-new-session");
-
-        {
-            let store = SessionStore::open(&db_path).expect("open");
-            let first = store
-                .load_or_create_active_session()
-                .expect("load/create first")
-                .session_id;
-            store
-                .insert_message(first, "user", "existing history")
-                .expect("insert existing history");
-        }
-
-        {
-            let store = SessionStore::open(&db_path).expect("reopen");
-            let loaded = store.load_or_create_active_session().expect("load active");
-            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
-            let original_session_id = app.active_session_id;
-            let original_session_count = app.sessions.len();
-
-            app.mode = InputMode::Landing;
-            app.composer_input = "new chat prompt".to_string();
-
-            assert!(create_fresh_session_for_landing_submit(&mut app));
-            assert_ne!(app.active_session_id, original_session_id);
-            assert_eq!(app.sessions.len(), original_session_count + 1);
-            assert!(app.messages.is_empty());
-            assert_eq!(app.composer_input, "new chat prompt");
-        }
-
-        let _ = fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn auto_titles_new_session_from_first_message() {
-        let db_path = temp_db_path("auto-title");
-
-        {
-            let store = SessionStore::open(&db_path).expect("open");
-            let loaded = store.load_or_create_active_session().expect("load");
-            let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
-            maybe_auto_title_session(
-                &mut app,
-                "Summarize quarterly revenue trends for 2025 and suggest next steps",
-            );
-
-            let title = app
-                .sessions
-                .iter()
-                .find(|session| session.id == app.active_session_id)
-                .and_then(|session| session.title.clone())
-                .expect("auto title should exist");
-            assert_eq!(title, "Quarterly Revenue Trends 2025");
-        }
-
-        let _ = fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn suggest_session_title_is_concise() {
-        let title = suggest_session_title(
-            "This is a very long request that should become a concise title for a session with truncation applied",
-        );
-        assert!(title.len() <= 35);
-        assert!(title.ends_with("..."));
-    }
-
-    #[test]
-    fn suggest_session_title_preserves_contractions() {
-        let title = suggest_session_title("What's the difference between beef and chicken?");
-        assert!(title.starts_with("What's "));
-        assert!(!title.starts_with("What S "));
-    }
-
-    #[test]
-    fn generated_title_is_normalized() {
-        let title = normalize_generated_title(" \"release checklist for mvp.\" \nextra");
-        assert_eq!(title, "release checklist for mvp");
-    }
-
-    #[test]
-    fn conditional_title_update_respects_expected_value() {
-        let db_path = temp_db_path("conditional-title-update");
-
-        {
-            let store = SessionStore::open(&db_path).expect("open");
-            let session_id = store
-                .load_or_create_active_session()
-                .expect("load")
-                .session_id;
-
-            store
-                .rename_session(session_id, Some("Initial"))
-                .expect("seed title");
-            let changed = store
-                .rename_session_if_current_title(
-                    session_id,
-                    Some("Initial"),
-                    Some("Generated Title"),
-                )
-                .expect("conditional rename");
-            assert!(changed);
-
-            store
-                .rename_session(session_id, Some("Manual Override"))
-                .expect("manual rename");
-            let changed = store
-                .rename_session_if_current_title(
-                    session_id,
-                    Some("Generated Title"),
-                    Some("Should Not Apply"),
-                )
-                .expect("conditional rename no-op");
-            assert!(!changed);
-
-            let title = store
-                .list_sessions()
-                .expect("list")
-                .into_iter()
-                .find(|session| session.id == session_id)
-                .and_then(|session| session.title)
-                .expect("title");
-            assert_eq!(title, "Manual Override");
-        }
-
-        let _ = fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn transcript_marks_assistant_separator_and_marker() {
-        let messages = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: "hello".to_string(),
-            },
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: "world".to_string(),
-            },
-        ];
-        let (lines, markers) = render_lines_text(messages, false);
-        assert_eq!(markers.len(), 1);
-        let marker_idx = markers[0] as usize;
-        assert!(marker_idx < lines.len());
-        assert!(lines[marker_idx].contains("🤖 "));
-        assert!(lines[marker_idx].contains("Rosie"));
-    }
-
-    #[test]
-    fn transcript_code_block_has_frame_and_padded_width() {
-        let messages = vec![ChatMessage {
-            role: "assistant".to_string(),
-            content: "```rs\nlet value = 10;\nx\n```".to_string(),
-        }];
-        let (lines, _) = render_lines_text(messages, false);
-        let start_idx = lines
-            .iter()
-            .position(|line| line.starts_with("  ╭─ code: rs"))
-            .expect("code block start line");
-        assert!(lines.iter().any(|line| line.starts_with("  ╰")));
-
-        let body = lines
-            .iter()
-            .skip(start_idx + 1)
-            .take_while(|line| !line.starts_with("  ╰"))
-            .filter(|line| line.starts_with("  │ "))
-            .cloned()
-            .collect::<Vec<_>>();
-        assert_eq!(body.len(), 2);
-        assert_eq!(body[0].chars().count(), body[1].chars().count());
-    }
-
-    #[test]
-    fn transcript_user_prefix_only_on_first_non_assistant_line() {
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: "alpha\nbeta".to_string(),
-        }];
-        let (lines, _) = render_lines_text(messages, false);
-        assert!(lines.iter().any(|line| line == "You: alpha"));
-        assert!(lines.iter().any(|line| line == "  beta"));
-        let prefixed = lines.iter().filter(|line| line.starts_with("You:")).count();
-        assert_eq!(prefixed, 1);
-    }
-
-    #[test]
-    fn transcript_assistant_markdown_line_invariants() {
-        let messages = vec![ChatMessage {
-            role: "assistant".to_string(),
-            content: "## Heading\n- item\n> quote\n---".to_string(),
-        }];
-        let (lines, _) = render_lines_text(messages, false);
-        assert!(lines.iter().any(|line| line == "## Heading"));
-        assert!(lines.iter().any(|line| line == "• item"));
-        assert!(lines.iter().any(|line| line == "▎ quote"));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line == "────────────────────────────────")
-        );
-    }
-}
+mod tests;
