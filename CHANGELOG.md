@@ -5,7 +5,9 @@
 ### Changed
 
 - Replaced the legacy flat provider config with `active_provider` plus `[providers.<name>]` blocks, and reject legacy-only config files at runtime
-- Added a shared provider abstraction layer and routed `--ask` / `--cmd` through it, with Ollama implemented in the first integration pass
+- Added OpenAI, Anthropic, and OpenAI-compatible provider implementations on top of the shared provider abstraction for `--ask` / `--cmd`
+- Added OS keychain-backed `rosie auth add|list|remove` credential management with environment-variable overrides
+- Added transport validation for remote providers, including HTTPS enforcement for OpenAI/Anthropic and guarded HTTP exceptions for local OpenAI-compatible hosts
 - Renamed the interactive setup flag from `--configure` to `--config`
 
 ## 0.8.3

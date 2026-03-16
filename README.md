@@ -15,10 +15,11 @@ Running `rosie` with no mode flag launches the full-screen TUI chat interface (l
 - `--model <MODEL>` runtime model override for both `--ask` and `--cmd`
 - Provider-driven model defaults in `~/.config/rosie/config.toml`
 - Interactive `--config` flow with provider-aware setup
+- `rosie auth add|list|remove` for API-key management
 - Local install helper via `rosie -install`
 - Cross-platform Rust binary (Linux/macOS/Windows with Rust toolchain)
 
-The provider foundation is in place, but this first integration pass only wires Ollama end-to-end. Other provider types are part of the new config shape, but their live request and auth flows are still follow-up work.
+`--ask` and `--cmd` now work with Ollama, OpenAI, Anthropic, and OpenAI-compatible providers. The TUI still expects the active provider to be Ollama in this phase.
 
 ## Installation
 
@@ -50,6 +51,11 @@ rosie
 
 # Configure Rosie provider settings
 rosie --config
+
+# Store an API key in the OS keychain
+rosie auth add openai
+rosie auth add anthropic
+rosie auth add local
 
 # Install current binary
 rosie -install
@@ -135,6 +141,16 @@ That command creates/updates config and prompts for:
 - one provider block under `[providers.<name>]`
 - `execution_enabled` (controls whether execute is allowed in `--cmd`)
 
+Credential resolution order:
+1. environment variable
+2. OS keychain via `rosie auth add <provider>`
+3. error
+
+Credential environment variables:
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `ROSIE_<PROVIDER_NAME>_API_KEY` for named `openai-compatible` providers
+
 Theme is controlled in TUI with `:theme` and persisted into config as `theme`.
 `theme` accepts a packaged theme name from the repo `themes/` directory or a user file theme name loaded from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`).
 Packaged defaults include Rose Pine variants (`rose-pine`, `rose-pine-moon`, `rose-pine-dawn`).
@@ -150,6 +166,18 @@ execution_enabled = true
 type = "ollama"
 endpoint = "http://localhost:11434"
 model = "llama3.2"
+```
+
+Example OpenAI-compatible config:
+
+```toml
+active_provider = "local"
+
+[providers.local]
+type = "openai-compatible"
+endpoint = "http://192.168.1.20:8080/v1"
+model = "omnicoder-9b"
+allow_insecure_http = false
 ```
 
 Theme file schema (preferred):
@@ -201,6 +229,11 @@ Model resolution order:
 3. first available provider-discovered model when supported
 
 If no model can be resolved, Rosie exits with an actionable error.
+
+Remote transport rules:
+- OpenAI and Anthropic endpoints must use HTTPS
+- OpenAI-compatible endpoints may use plain HTTP on `localhost`, loopback IPs, and `192.168.x.x`
+- other non-HTTPS OpenAI-compatible endpoints require `allow_insecure_http = true`
 
 ## Releasing
 

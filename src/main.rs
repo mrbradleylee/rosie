@@ -1,6 +1,7 @@
 // src/main.rs
 mod cli;
 mod config;
+mod credentials;
 mod install;
 mod llm;
 mod paths;
@@ -12,6 +13,9 @@ mod tui;
 use anyhow::{Result, anyhow};
 use cli::{AuthAction, Command as CliCommand, parse_args};
 use config::{ProviderConfig, StoredConfig, load_config};
+use credentials::{CredentialManager, credential_target_from_name, env_var_name};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use install::install;
 use llm::{GeneratedCommand, generate_chat_with_spinner, generate_command_with_spinner};
 use paths::{app_data_dir, config_path};
@@ -304,17 +308,55 @@ async fn configure() -> Result<()> {
 
 fn handle_command(command: CliCommand) -> Result<()> {
     match command {
-        CliCommand::Auth(auth) => match auth.action {
-            AuthAction::Add { provider } => Err(anyhow!(
-                "`rosie auth add {provider}` is planned but not implemented in this first iteration"
-            )),
-            AuthAction::List => Err(anyhow!(
-                "`rosie auth list` is planned but not implemented in this first iteration"
-            )),
-            AuthAction::Remove { provider } => Err(anyhow!(
-                "`rosie auth remove {provider}` is planned but not implemented in this first iteration"
-            )),
-        },
+        CliCommand::Auth(auth) => handle_auth_command(auth.action),
+    }
+}
+
+fn handle_auth_command(action: AuthAction) -> Result<()> {
+    let config = load_config().ok();
+    let manager = CredentialManager::new();
+
+    match action {
+        AuthAction::Add { provider } => {
+            let target = credential_target_from_name(config.as_ref(), &provider)?;
+            let secret = if io::stdin().is_terminal() {
+                prompt_secret(&format!("API key for {provider}"))?
+            } else {
+                let mut value = String::new();
+                io::stdin().lock().read_line(&mut value)?;
+                value.trim().to_string()
+            };
+            manager.set(&target, &secret)?;
+            println!("Stored credential for {}", target);
+            if let Some(env_var) = env_var_name(&target) {
+                println!("Env override remains available via {}", env_var);
+            }
+            Ok(())
+        }
+        AuthAction::List => {
+            let statuses = manager.list_statuses(config.as_ref())?;
+            for status in statuses {
+                let env_label = status.env_var.unwrap_or_else(|| "-".to_string());
+                println!(
+                    "{}: env={} ({}) keychain={}",
+                    status.target,
+                    env_label,
+                    if status.has_env { "set" } else { "unset" },
+                    if status.has_keychain {
+                        "stored"
+                    } else {
+                        "empty"
+                    }
+                );
+            }
+            Ok(())
+        }
+        AuthAction::Remove { provider } => {
+            let target = credential_target_from_name(config.as_ref(), &provider)?;
+            manager.remove(&target)?;
+            println!("Removed keychain credential for {}", target);
+            Ok(())
+        }
     }
 }
 
@@ -348,35 +390,63 @@ async fn configure_provider(
     match provider_kind.as_str() {
         "ollama" => configure_ollama_provider(existing_provider).await,
         "openai" => {
-            let current_model = match existing_provider {
-                ProviderConfig::OpenAi { model } => model.as_deref(),
-                _ => None,
+            let (current_endpoint, current_model) = match existing_provider {
+                ProviderConfig::OpenAi { endpoint, model } => {
+                    (endpoint.as_deref(), model.as_deref())
+                }
+                _ => (None, None),
             };
+            let endpoint = prompt_config_value(
+                "OpenAI endpoint (optional, defaults to official API)",
+                current_endpoint,
+                true,
+            )?;
             Ok(ProviderConfig::OpenAi {
+                endpoint: normalize_config_value(endpoint),
                 model: normalize_config_value(prompt_config_value("Model", current_model, false)?),
             })
         }
         "anthropic" => {
-            let current_model = match existing_provider {
-                ProviderConfig::Anthropic { model } => model.as_deref(),
-                _ => None,
+            let (current_endpoint, current_model) = match existing_provider {
+                ProviderConfig::Anthropic { endpoint, model } => {
+                    (endpoint.as_deref(), model.as_deref())
+                }
+                _ => (None, None),
             };
+            let endpoint = prompt_config_value(
+                "Anthropic endpoint (optional, defaults to official API)",
+                current_endpoint,
+                true,
+            )?;
             Ok(ProviderConfig::Anthropic {
+                endpoint: normalize_config_value(endpoint),
                 model: normalize_config_value(prompt_config_value("Model", current_model, false)?),
             })
         }
         "openai-compatible" => {
-            let (current_endpoint, current_model) = match existing_provider {
-                ProviderConfig::OpenAiCompatible { endpoint, model } => {
-                    (Some(endpoint.as_str()), model.as_deref())
-                }
-                _ => (None, None),
-            };
+            let (current_endpoint, current_model, current_allow_insecure_http) =
+                match existing_provider {
+                    ProviderConfig::OpenAiCompatible {
+                        endpoint,
+                        model,
+                        allow_insecure_http,
+                    } => (
+                        Some(endpoint.as_str()),
+                        model.as_deref(),
+                        *allow_insecure_http,
+                    ),
+                    _ => (None, None, false),
+                };
             let endpoint = prompt_config_value("Endpoint", current_endpoint, false)?;
             let model = prompt_config_value("Model", current_model, false)?;
+            let allow_insecure_http = prompt_bool_config_value(
+                "Allow insecure HTTP for non-local hosts",
+                current_allow_insecure_http,
+            )?;
             Ok(ProviderConfig::OpenAiCompatible {
                 endpoint,
                 model: normalize_config_value(model),
+                allow_insecure_http,
             })
         }
         _ => Err(anyhow!("Unsupported provider type '{}'", provider_kind)),
@@ -527,6 +597,43 @@ fn normalize_config_value(value: String) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn prompt_secret(label: &str) -> Result<String> {
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "{}: ", label)?;
+    stdout.flush()?;
+
+    enable_raw_mode()?;
+    let mut secret = String::new();
+
+    loop {
+        if let Event::Key(event) = event::read()? {
+            match event.code {
+                KeyCode::Enter => break,
+                KeyCode::Char('c') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    disable_raw_mode()?;
+                    return Err(anyhow!("Credential entry cancelled"));
+                }
+                KeyCode::Backspace => {
+                    secret.pop();
+                }
+                KeyCode::Char(ch) if !event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    secret.push(ch);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    disable_raw_mode()?;
+    println!();
+
+    if secret.trim().is_empty() {
+        return Err(anyhow!("Credential cannot be empty"));
+    }
+
+    Ok(secret)
 }
 
 fn prompt_bool_config_value(label: &str, current: bool) -> Result<bool> {

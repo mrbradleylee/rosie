@@ -167,6 +167,15 @@ Display version information and exit.
 .TP
 .BR -h , " --help"
 Print help information.
+.TP
+.B rosie auth add
+Store a provider API key in the OS keychain.
+.TP
+.B rosie auth list
+Show whether provider credentials are available from environment variables or keychain storage.
+.TP
+.B rosie auth remove
+Delete a provider API key from the OS keychain.
 .SH CONFIGURATION
 Rosie uses file-based configuration:
 .TP
@@ -189,6 +198,12 @@ and provider-specific fields such as
 .B endpoint
 and
 .B model
+.TP
+.B allow_insecure_http
+Optional for
+.B openai-compatible
+providers to permit non-HTTPS endpoints outside localhost and
+.B 192.168.x.x
 .TP
 .B theme
 TUI theme name (built-in or file-based) loaded from
@@ -215,7 +230,19 @@ active provider
 .IP "3." 4
 first provider-discovered model when supported
 .PP
-Current provider integration is partial: Ollama is wired end-to-end in this first pass, and the TUI currently requires an Ollama active provider.
+API keys resolve from provider-specific environment variables first and then the OS keychain. OpenAI uses
+.BR OPENAI_API_KEY ,
+Anthropic uses
+.BR ANTHROPIC_API_KEY ,
+and named compatible providers use
+.BR ROSIE_<PROVIDER_NAME>_API_KEY .
+.PP
+OpenAI and Anthropic endpoints must use HTTPS. OpenAI-compatible endpoints may use plain HTTP on localhost, loopback IPs, and
+.B 192.168.x.x
+by default; other non-HTTPS hosts require
+.BR allow_insecure_http " = true" .
+.PP
+Current provider integration is partial: `--ask` and `--cmd` support the provider runtime, and the TUI currently requires an Ollama active provider.
 .SH FILES
 .TP
 .I ~/.config/rosie/config.toml

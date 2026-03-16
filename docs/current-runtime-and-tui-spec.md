@@ -15,7 +15,7 @@ This document reflects shipped behavior in the current codebase.
 `--ask` and `--cmd` are mutually exclusive.
 
 Current limitation:
-- the provider abstraction exists, but only Ollama is wired for live requests in this first integration pass
+- `--ask` and `--cmd` are wired through the multi-provider runtime
 - the TUI currently requires the active provider to be Ollama
 
 ## CLI/config behavior
@@ -27,6 +27,10 @@ Current limitation:
   - `[providers.<name>]`
   - `theme`
   - `execution_enabled`
+- Auth commands:
+  - `rosie auth add <provider>`
+  - `rosie auth list`
+  - `rosie auth remove <provider>`
 - Model resolution order:
   1. `--model`
   2. active provider config `model`

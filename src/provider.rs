@@ -1,5 +1,9 @@
 use crate::config::{ProviderConfig, StoredConfig};
+use crate::credentials::CredentialManager;
+use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::ollama::OllamaProvider;
+use crate::providers::openai::OpenAiProvider;
+use crate::providers::openai_compatible::OpenAiCompatibleProvider;
 use anyhow::{Result, anyhow};
 use std::future::Future;
 use std::pin::Pin;
@@ -68,16 +72,33 @@ pub struct ProviderRouter {
 
 impl ProviderRouter {
     pub fn from_config(config: &StoredConfig) -> Result<Self> {
-        let (_name, provider) = config.active_provider_entry()?;
+        let (provider_name, provider) = config.active_provider_entry()?;
+        let credentials = CredentialManager::new();
         let provider: Arc<dyn Provider> = match provider {
             ProviderConfig::Ollama { endpoint, model } => {
                 Arc::new(OllamaProvider::new(endpoint.clone(), model.clone()))
             }
-            ProviderConfig::OpenAi { .. } => Arc::new(UnsupportedProvider::new("openai")),
-            ProviderConfig::Anthropic { .. } => Arc::new(UnsupportedProvider::new("anthropic")),
-            ProviderConfig::OpenAiCompatible { .. } => {
-                Arc::new(UnsupportedProvider::new("openai-compatible"))
-            }
+            ProviderConfig::OpenAi { endpoint, model } => Arc::new(OpenAiProvider::new(
+                endpoint.clone(),
+                model.clone(),
+                credentials.clone(),
+            )),
+            ProviderConfig::Anthropic { endpoint, model } => Arc::new(AnthropicProvider::new(
+                endpoint.clone(),
+                model.clone(),
+                credentials.clone(),
+            )),
+            ProviderConfig::OpenAiCompatible {
+                endpoint,
+                model,
+                allow_insecure_http,
+            } => Arc::new(OpenAiCompatibleProvider::new(
+                provider_name.to_string(),
+                endpoint.clone(),
+                model.clone(),
+                *allow_insecure_http,
+                credentials.clone(),
+            )),
         };
 
         Ok(Self { provider })
@@ -109,38 +130,6 @@ impl ProviderRouter {
 
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
         self.provider.chat(request).await
-    }
-}
-
-struct UnsupportedProvider {
-    provider_type: &'static str,
-}
-
-impl UnsupportedProvider {
-    fn new(provider_type: &'static str) -> Self {
-        Self { provider_type }
-    }
-}
-
-impl Provider for UnsupportedProvider {
-    fn provider_type(&self) -> &'static str {
-        self.provider_type
-    }
-
-    fn default_model(&self) -> Option<&str> {
-        None
-    }
-
-    fn chat(
-        &self,
-        _request: ChatRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ChatResponse>> + Send + '_>> {
-        Box::pin(async move {
-            Err(anyhow!(
-                "{} is not wired into Rosie yet in this first provider refactor pass",
-                self.provider_type
-            ))
-        })
     }
 }
 
