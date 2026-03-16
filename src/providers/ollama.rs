@@ -64,7 +64,6 @@ struct OllamaTagsResponse {
 #[derive(Deserialize)]
 struct OllamaChatChunk {
     message: Option<OllamaChunkMessage>,
-    done: Option<bool>,
     error: Option<String>,
 }
 
@@ -255,10 +254,6 @@ fn parse_and_emit_line(line: &str, tx: &mpsc::UnboundedSender<ProviderEvent>) ->
         && !content.is_empty()
     {
         let _ = tx.send(ProviderEvent::Token(content));
-    }
-
-    if parsed.done.unwrap_or(false) {
-        let _ = tx.send(ProviderEvent::Done);
     }
 
     Ok(())

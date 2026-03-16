@@ -338,9 +338,10 @@ fn role_from_str(value: &str) -> Role {
 }
 
 fn parse_stream_line(line: &str, tx: &mpsc::UnboundedSender<ProviderEvent>) -> Result<()> {
-    let payload = line.strip_prefix("data: ").unwrap_or(line).trim();
+    let Some(payload) = sse_payload(line) else {
+        return Ok(());
+    };
     if payload == "[DONE]" {
-        let _ = tx.send(ProviderEvent::Done);
         return Ok(());
     }
 
@@ -356,9 +357,66 @@ fn parse_stream_line(line: &str, tx: &mpsc::UnboundedSender<ProviderEvent>) -> R
     Ok(())
 }
 
+fn sse_payload(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with(':') || trimmed.starts_with("event:") {
+        return None;
+    }
+
+    let payload = trimmed.strip_prefix("data:").unwrap_or(trimmed).trim();
+    (!payload.is_empty()).then_some(payload)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate_compatible_endpoint;
+    use super::{OpenAiCompatibleProvider, parse_stream_line, validate_compatible_endpoint};
+    use crate::credentials::{CredentialManager, CredentialTarget, SecretStore};
+    use crate::provider::{ChatRequest, Message, Provider, ProviderEvent, Role};
+    use anyhow::Result;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+
+    struct MemoryStore {
+        secrets: Mutex<BTreeMap<String, String>>,
+    }
+
+    impl MemoryStore {
+        fn new() -> Self {
+            Self {
+                secrets: Mutex::new(BTreeMap::new()),
+            }
+        }
+    }
+
+    impl SecretStore for MemoryStore {
+        fn get_secret(&self, target: &CredentialTarget) -> Result<Option<String>> {
+            Ok(self
+                .secrets
+                .lock()
+                .expect("lock")
+                .get(&target.to_string())
+                .cloned())
+        }
+
+        fn set_secret(&self, target: &CredentialTarget, secret: &str) -> Result<()> {
+            self.secrets
+                .lock()
+                .expect("lock")
+                .insert(target.to_string(), secret.to_string());
+            Ok(())
+        }
+
+        fn delete_secret(&self, target: &CredentialTarget) -> Result<()> {
+            self.secrets
+                .lock()
+                .expect("lock")
+                .remove(&target.to_string());
+            Ok(())
+        }
+    }
 
     #[test]
     fn allows_local_network_http_by_default() {
@@ -374,5 +432,83 @@ mod tests {
             err.to_string()
                 .contains("Refusing insecure non-local endpoint")
         );
+    }
+
+    #[test]
+    fn parser_ignores_non_data_sse_lines() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        parse_stream_line(": keep-alive", &tx).expect("comment ignored");
+        parse_stream_line("event: message", &tx).expect("event ignored");
+        parse_stream_line("data:", &tx).expect("empty ignored");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn provider_streams_compatible_sse_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer).await.expect("read");
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"omni\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"coder\"}}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+        });
+
+        let store = Arc::new(MemoryStore::new());
+        store
+            .set_secret(
+                &CredentialTarget::NamedProvider("local".to_string()),
+                "test-key",
+            )
+            .expect("set secret");
+        let provider = OpenAiCompatibleProvider::new(
+            "local".to_string(),
+            format!("http://127.0.0.1:{}/v1", addr.port()),
+            Some("test-model".to_string()),
+            false,
+            CredentialManager::with_store(store),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        provider
+            .stream_chat(
+                ChatRequest {
+                    model: "test-model".to_string(),
+                    messages: vec![Message {
+                        role: Role::User,
+                        content: "hello".to_string(),
+                    }],
+                    temperature: None,
+                },
+                tx,
+            )
+            .await
+            .expect("stream chat");
+
+        let mut chunks = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            chunks.push(event);
+        }
+        assert_eq!(
+            chunks,
+            vec![
+                ProviderEvent::Token("omni".to_string()),
+                ProviderEvent::Token("coder".to_string()),
+                ProviderEvent::Done,
+            ]
+        );
+
+        server.await.expect("server task");
     }
 }

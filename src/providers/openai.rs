@@ -278,9 +278,10 @@ fn role_from_str(value: &str) -> Role {
 }
 
 fn parse_openai_stream_line(line: &str, tx: &mpsc::UnboundedSender<ProviderEvent>) -> Result<()> {
-    let payload = line.strip_prefix("data: ").unwrap_or(line).trim();
+    let Some(payload) = sse_payload(line) else {
+        return Ok(());
+    };
     if payload == "[DONE]" {
-        let _ = tx.send(ProviderEvent::Done);
         return Ok(());
     }
 
@@ -294,4 +295,144 @@ fn parse_openai_stream_line(line: &str, tx: &mpsc::UnboundedSender<ProviderEvent
         }
     }
     Ok(())
+}
+
+fn sse_payload(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with(':') || trimmed.starts_with("event:") {
+        return None;
+    }
+
+    let payload = trimmed.strip_prefix("data:").unwrap_or(trimmed).trim();
+    (!payload.is_empty()).then_some(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OpenAiProvider, parse_openai_stream_line};
+    use crate::credentials::{CredentialManager, CredentialTarget, SecretStore};
+    use crate::provider::{ChatRequest, Message, Provider, ProviderEvent, Role};
+    use anyhow::Result;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+
+    struct MemoryStore {
+        secrets: Mutex<BTreeMap<String, String>>,
+    }
+
+    impl MemoryStore {
+        fn new() -> Self {
+            Self {
+                secrets: Mutex::new(BTreeMap::new()),
+            }
+        }
+    }
+
+    impl SecretStore for MemoryStore {
+        fn get_secret(&self, target: &CredentialTarget) -> Result<Option<String>> {
+            Ok(self
+                .secrets
+                .lock()
+                .expect("lock")
+                .get(&target.to_string())
+                .cloned())
+        }
+
+        fn set_secret(&self, target: &CredentialTarget, secret: &str) -> Result<()> {
+            self.secrets
+                .lock()
+                .expect("lock")
+                .insert(target.to_string(), secret.to_string());
+            Ok(())
+        }
+
+        fn delete_secret(&self, target: &CredentialTarget) -> Result<()> {
+            self.secrets
+                .lock()
+                .expect("lock")
+                .remove(&target.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn parser_ignores_non_data_sse_lines() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        parse_openai_stream_line(": keep-alive", &tx).expect("comment ignored");
+        parse_openai_stream_line("event: message", &tx).expect("event ignored");
+        parse_openai_stream_line("data:", &tx).expect("empty data ignored");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn provider_streams_openai_sse_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer).await.expect("read");
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+                "event: message\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let store = Arc::new(MemoryStore::new());
+        store
+            .set_secret(&CredentialTarget::OpenAi, "test-key")
+            .expect("set secret");
+        let provider = OpenAiProvider::new(
+            Some(format!("http://{addr}/v1")),
+            Some("gpt-test".to_string()),
+            CredentialManager::with_store(store),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        provider
+            .stream_chat(
+                ChatRequest {
+                    model: "gpt-test".to_string(),
+                    messages: vec![Message {
+                        role: Role::User,
+                        content: "hello".to_string(),
+                    }],
+                    temperature: None,
+                },
+                tx,
+            )
+            .await
+            .expect("stream chat");
+
+        let mut chunks = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            chunks.push(event);
+        }
+
+        assert_eq!(
+            chunks,
+            vec![
+                ProviderEvent::Token("Hel".to_string()),
+                ProviderEvent::Token("lo".to_string()),
+                ProviderEvent::Done,
+            ]
+        );
+
+        server.await.expect("server task");
+    }
 }

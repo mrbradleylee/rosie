@@ -250,7 +250,9 @@ fn parse_anthropic_stream_line(
     line: &str,
     tx: &mpsc::UnboundedSender<ProviderEvent>,
 ) -> Result<()> {
-    let payload = line.strip_prefix("data: ").unwrap_or(line).trim();
+    let Some(payload) = sse_payload(line) else {
+        return Ok(());
+    };
     let parsed: AnthropicStreamEvent =
         serde_json::from_str(payload).map_err(|e| anyhow!("Failed to parse stream JSON: {e}"))?;
 
@@ -263,4 +265,44 @@ fn parse_anthropic_stream_line(
     }
 
     Ok(())
+}
+
+fn sse_payload(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with(':') || trimmed.starts_with("event:") {
+        return None;
+    }
+
+    let payload = trimmed.strip_prefix("data:").unwrap_or(trimmed).trim();
+    (!payload.is_empty()).then_some(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_anthropic_stream_line;
+    use crate::provider::ProviderEvent;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn parser_ignores_non_payload_lines() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        parse_anthropic_stream_line(": ping", &tx).expect("comment ignored");
+        parse_anthropic_stream_line("event: content_block_delta", &tx).expect("event ignored");
+        parse_anthropic_stream_line("data:", &tx).expect("empty ignored");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn parser_emits_text_delta() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        parse_anthropic_stream_line(
+            r#"data: {"type":"content_block_delta","delta":{"text":"hello"}}"#,
+            &tx,
+        )
+        .expect("parse");
+        assert_eq!(
+            rx.try_recv().expect("token"),
+            ProviderEvent::Token("hello".to_string())
+        );
+    }
 }
