@@ -82,6 +82,8 @@ struct AppState {
     model_options: Vec<String>,
     model_selected_index: usize,
     model_loading: bool,
+    model_manual_entry: bool,
+    model_input: String,
     model_error: Option<String>,
     model_cache: Vec<String>,
     model_cache_host: Option<String>,
@@ -144,6 +146,8 @@ impl AppState {
             model_options: Vec::new(),
             model_selected_index: 0,
             model_loading: false,
+            model_manual_entry: false,
+            model_input: String::new(),
             model_error: None,
             model_cache: Vec::new(),
             model_cache_host: None,
@@ -167,7 +171,7 @@ impl AppState {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InputMode {
     Landing,
     Normal,
@@ -818,6 +822,25 @@ fn handle_confirm_delete_input(app: &mut AppState, key: KeyEvent) -> bool {
 }
 
 fn handle_model_select_input(app: &mut AppState, key: KeyEvent) -> bool {
+    if app.model_manual_entry {
+        match key.code {
+            KeyCode::Esc => {
+                cancel_model_fetch(app);
+                app.mode = primary_mode_for_app(app);
+                app.status_message = "Model picker cancelled.".to_string();
+            }
+            KeyCode::Enter => apply_selected_model(app),
+            KeyCode::Backspace => {
+                app.model_input.pop();
+            }
+            KeyCode::Char(ch) => {
+                app.model_input.push(ch);
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     match key.code {
         KeyCode::Esc => {
             cancel_model_fetch(app);
@@ -1180,7 +1203,9 @@ fn mode_label(mode: InputMode) -> &'static str {
     }
 }
 
-fn footer_help_for_mode(mode: InputMode, is_busy: bool) -> &'static str {
+fn footer_help_for_mode(app: &AppState) -> &'static str {
+    let mode = app.mode;
+    let is_busy = app.is_busy();
     match mode {
         InputMode::Landing => "Type message | Enter send | Ctrl+P/: cmd | ?: help",
         InputMode::Normal => {
@@ -1197,17 +1222,23 @@ fn footer_help_for_mode(mode: InputMode, is_busy: bool) -> &'static str {
         }
         InputMode::SessionRename => "Type title | Enter save | Esc cancel",
         InputMode::ConfirmDelete => "Confirm delete: Enter/y=yes, n/Esc=no",
-        InputMode::ModelSelect => "Model picker: j/k move | Enter select | Esc cancel",
+        InputMode::ModelSelect => {
+            if app.model_manual_entry {
+                "Model picker: type name | Enter apply | Esc cancel"
+            } else {
+                "Model picker: j/k move | Enter select | Esc cancel"
+            }
+        }
         InputMode::ThemeSelect => "Theme picker: j/k move | Enter select | Esc cancel",
         InputMode::Help => "Help: Esc/q/? close",
     }
 }
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Rect, theme: ThemePalette) {
-    let footer_help = footer_help_for_mode(app.mode, app.is_busy());
+    let footer_help = footer_help_for_mode(app);
     let footer_width = area.width as usize;
     let compact_help = if footer_width < 80 {
-        compact_footer_help(app.mode, app.is_busy())
+        compact_footer_help(app)
     } else {
         footer_help.to_string()
     };
@@ -1363,6 +1394,14 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
         let mut rows = Vec::new();
         if app.model_loading {
             rows.push(format!("Loading models from {}...", app.provider_name));
+        } else if app.model_manual_entry {
+            rows.push(format!(
+                "Model discovery isn't available for {}.",
+                app.provider_name
+            ));
+            rows.push("Enter a model name and press Enter to apply it:".to_string());
+            rows.push(String::new());
+            rows.push(format!("> {}", app.model_input));
         } else if let Some(error) = app.model_error.as_deref() {
             rows.push(format!("Failed to load models: {error}"));
         } else if app.model_options.is_empty() {
@@ -1838,6 +1877,8 @@ fn process_model_fetch_events(app: &mut AppState) {
             Ok(ModelFetchEvent::Loaded(models)) => {
                 app.model_options = models.clone();
                 app.model_loading = false;
+                app.model_manual_entry = false;
+                app.model_input.clear();
                 app.model_error = None;
                 app.model_cache = models;
                 app.model_cache_host = Some(app.host.clone());
@@ -1856,6 +1897,8 @@ fn process_model_fetch_events(app: &mut AppState) {
             }
             Ok(ModelFetchEvent::Error(message)) => {
                 app.model_loading = false;
+                app.model_manual_entry = false;
+                app.model_input.clear();
                 app.model_options.clear();
                 app.model_selected_index = 0;
                 app.model_error = Some(message.clone());
@@ -2411,8 +2454,23 @@ fn open_model_picker(app: &mut AppState) {
     cancel_model_fetch(app);
     app.mode = InputMode::ModelSelect;
     app.model_error = None;
+    app.model_manual_entry = false;
+    app.model_input.clear();
     if apply_cached_model_options(app) {
         return;
+    }
+
+    match provider_supports_model_discovery(&app.config) {
+        Ok(true) => {}
+        Ok(false) => {
+            enter_manual_model_entry(app);
+            return;
+        }
+        Err(err) => {
+            app.mode = primary_mode_for_app(app);
+            app.status_message = format!("Model picker unavailable: {err}");
+            return;
+        }
     }
 
     app.model_options.clear();
@@ -2448,6 +2506,8 @@ fn apply_cached_model_options(app: &mut AppState) -> bool {
 
     app.model_options = app.model_cache.clone();
     app.model_loading = false;
+    app.model_manual_entry = false;
+    app.model_input.clear();
     app.model_selected_index = app
         .model_options
         .iter()
@@ -2513,9 +2573,19 @@ fn apply_selected_model(app: &mut AppState) {
         return;
     }
 
-    let Some(selected) = app.model_options.get(app.model_selected_index).cloned() else {
-        app.status_message = "No model selected.".to_string();
-        return;
+    let selected = if app.model_manual_entry {
+        let typed = app.model_input.trim();
+        if typed.is_empty() {
+            app.status_message = "Enter a model name first.".to_string();
+            return;
+        }
+        typed.to_string()
+    } else {
+        let Some(selected) = app.model_options.get(app.model_selected_index).cloned() else {
+            app.status_message = "No model selected.".to_string();
+            return;
+        };
+        selected
     };
     if !ensure_active_session_for_chat(app) {
         return;
@@ -2530,6 +2600,8 @@ fn apply_selected_model(app: &mut AppState) {
             app.sessions_dirty = true;
             refresh_sessions(app, Some(app.active_session_id), false);
             app.mode = primary_mode_for_app(app);
+            app.model_manual_entry = false;
+            app.model_input.clear();
             app.status_message = format!("Session model set to {selected}");
         }
         Err(err) => {
@@ -3734,7 +3806,9 @@ fn parse_markdown_list_item(line: &str) -> Option<&str> {
     None
 }
 
-fn compact_footer_help(mode: InputMode, is_busy: bool) -> String {
+fn compact_footer_help(app: &AppState) -> String {
+    let mode = app.mode;
+    let is_busy = app.is_busy();
     match mode {
         InputMode::Landing => "Enter send | Ctrl+P cmd".to_string(),
         InputMode::Normal => {
@@ -3749,7 +3823,13 @@ fn compact_footer_help(mode: InputMode, is_busy: bool) -> String {
         InputMode::SessionManager => "j/k move | Enter apply".to_string(),
         InputMode::SessionRename => "Type title | Enter save".to_string(),
         InputMode::ConfirmDelete => "Enter/y yes | n/Esc no".to_string(),
-        InputMode::ModelSelect => "j/k move | Enter select".to_string(),
+        InputMode::ModelSelect => {
+            if app.model_manual_entry {
+                "Type model | Enter apply".to_string()
+            } else {
+                "j/k move | Enter select".to_string()
+            }
+        }
         InputMode::ThemeSelect => "j/k move | Enter select".to_string(),
         InputMode::Help => "Esc/q/? close".to_string(),
     }
@@ -3863,6 +3943,11 @@ async fn fetch_provider_models(config: &StoredConfig) -> Result<Vec<String>> {
     router.list_models().await
 }
 
+fn provider_supports_model_discovery(config: &StoredConfig) -> Result<bool> {
+    let router = ProviderRouter::from_config(config)?;
+    Ok(router.supports_model_discovery())
+}
+
 async fn generate_session_title(
     config: &StoredConfig,
     model: &str,
@@ -3915,6 +4000,18 @@ fn provider_cache_key(config: &StoredConfig) -> Result<String> {
         ProviderConfig::OpenAiCompatible { endpoint, .. } => format!("{provider_name}:{endpoint}"),
     };
     Ok(key)
+}
+
+fn enter_manual_model_entry(app: &mut AppState) {
+    app.model_loading = false;
+    app.model_manual_entry = true;
+    app.model_options.clear();
+    app.model_selected_index = 0;
+    app.model_input = app.model.clone();
+    app.status_message = format!(
+        "Model discovery isn't available for {}. Type a model name to continue.",
+        app.provider_name
+    );
 }
 
 fn normalize_generated_title(raw: &str) -> String {

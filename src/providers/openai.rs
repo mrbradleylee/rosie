@@ -92,6 +92,10 @@ impl Provider for OpenAiProvider {
         self.model.as_deref()
     }
 
+    fn supports_model_discovery(&self) -> bool {
+        true
+    }
+
     fn chat(
         &self,
         request: ChatRequest,

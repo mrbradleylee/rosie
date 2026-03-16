@@ -9,6 +9,7 @@
 - Added OS keychain-backed `rosie auth add|list|remove` credential management with environment-variable overrides
 - Added transport validation for remote providers, including HTTPS enforcement for OpenAI/Anthropic and guarded HTTP exceptions for local OpenAI-compatible hosts
 - Routed TUI chat, model discovery, and auto-title generation through the shared provider runtime so non-Ollama providers can be used in the TUI as well
+- Updated `:models` to adapt per provider by using discovered model lists when available and manual model entry when discovery is unsupported
 - Upgraded `ratatui`, `reqwest`, and `keyring`, and replaced `syntect` code highlighting with a narrower tree-sitter-based implementation to clear the remaining audit warnings
 - Renamed the interactive setup flag from `--configure` to `--config`
 

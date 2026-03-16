@@ -57,6 +57,9 @@ pub enum ProviderEvent {
 pub trait Provider: Send + Sync {
     fn provider_type(&self) -> &'static str;
     fn default_model(&self) -> Option<&str>;
+    fn supports_model_discovery(&self) -> bool {
+        false
+    }
 
     fn chat(
         &self,
@@ -128,6 +131,10 @@ impl ProviderRouter {
 
     pub fn provider_type(&self) -> &'static str {
         self.provider.provider_type()
+    }
+
+    pub fn supports_model_discovery(&self) -> bool {
+        self.provider.supports_model_discovery()
     }
 
     pub async fn resolve_model(&self, runtime_model: Option<&str>) -> Result<String> {

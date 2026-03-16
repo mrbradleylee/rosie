@@ -1,6 +1,7 @@
 use super::*;
-use crate::config::StoredConfig;
+use crate::config::{ProviderConfig, StoredConfig};
 use crate::theme::{DEFAULT_THEME_KEY, default_theme, resolve_theme};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,6 +42,24 @@ fn build_app_from_store(
         sessions,
         selected_session_index,
     })
+}
+
+fn anthropic_config() -> StoredConfig {
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "anthropic".to_string(),
+        ProviderConfig::Anthropic {
+            endpoint: None,
+            model: Some("claude-3-7-sonnet".to_string()),
+        },
+    );
+
+    StoredConfig {
+        active_provider: Some("anthropic".to_string()),
+        providers,
+        theme: None,
+        execution_enabled: Some(true),
+    }
 }
 
 fn line_text(line: &Line<'_>) -> String {
@@ -120,6 +139,65 @@ fn apply_cached_model_options_uses_recent_cache() {
         assert_eq!(app.model_selected_index, 1);
         assert_eq!(app.status_message, "Loaded 2 cached model(s).");
         assert!(!app.model_loading);
+    }
+
+    let _ = fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn open_model_picker_uses_manual_entry_when_discovery_is_unavailable() {
+    let db_path = temp_db_path("model-picker-manual-entry");
+
+    {
+        let store = SessionStore::open(&db_path).expect("open");
+        let loaded = store.load_or_create_active_session().expect("load");
+        let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+        app.config = anthropic_config();
+        app.provider_name = "anthropic".to_string();
+        app.model = "claude-3-7-sonnet".to_string();
+
+        open_model_picker(&mut app);
+
+        assert_eq!(app.mode, InputMode::ModelSelect);
+        assert!(app.model_manual_entry);
+        assert_eq!(app.model_input, "claude-3-7-sonnet");
+        assert!(!app.model_loading);
+        assert!(app.model_options.is_empty());
+        assert_eq!(
+            app.status_message,
+            "Model discovery isn't available for anthropic. Type a model name to continue."
+        );
+    }
+
+    let _ = fs::remove_file(&db_path);
+}
+
+#[test]
+fn apply_selected_model_persists_manual_model_entry() {
+    let db_path = temp_db_path("model-picker-manual-apply");
+
+    {
+        let store = SessionStore::open(&db_path).expect("open");
+        let loaded = store.load_or_create_active_session().expect("load");
+        let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+        app.model_manual_entry = true;
+        app.model_input = "claude-3-7-sonnet-latest".to_string();
+        app.mode = InputMode::ModelSelect;
+
+        apply_selected_model(&mut app);
+
+        assert_eq!(app.model, "claude-3-7-sonnet-latest");
+        assert_eq!(app.mode, InputMode::Normal);
+        assert_eq!(
+            app.status_message,
+            "Session model set to claude-3-7-sonnet-latest"
+        );
+
+        let loaded = app
+            .store
+            .load_session(app.active_session_id)
+            .expect("reload persisted session");
+        assert_eq!(loaded.model.as_deref(), Some("claude-3-7-sonnet-latest"));
     }
 
     let _ = fs::remove_file(&db_path);
