@@ -1,9 +1,10 @@
 use crate::credentials::{CredentialManager, CredentialTarget};
-use crate::provider::{ChatRequest, ChatResponse, Message, Provider, Role};
+use crate::provider::{ChatRequest, ChatResponse, Message, Provider, ProviderEvent, Role};
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
+use tokio::sync::mpsc;
 
 pub const DEFAULT_OPENAI_ENDPOINT: &str = "https://api.openai.com/v1";
 
@@ -31,6 +32,8 @@ impl OpenAiProvider {
 struct OpenAiChatRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -48,6 +51,21 @@ struct OpenAiChoice {
 struct OpenAiResponseMessage {
     role: String,
     content: String,
+}
+
+#[derive(Deserialize)]
+struct OpenAiStreamChoice {
+    delta: OpenAiStreamDelta,
+}
+
+#[derive(Deserialize)]
+struct OpenAiStreamDelta {
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiStreamResponse {
+    choices: Vec<OpenAiStreamChoice>,
 }
 
 #[derive(Deserialize)]
@@ -99,6 +117,7 @@ impl Provider for OpenAiProvider {
                         content: message.content,
                     })
                     .collect(),
+                stream: false,
             };
 
             let resp = reqwest::Client::new()
@@ -173,6 +192,80 @@ impl Provider for OpenAiProvider {
             Ok(response.data.into_iter().map(|item| item.id).collect())
         })
     }
+
+    fn stream_chat(
+        &self,
+        request: ChatRequest,
+        tx: mpsc::UnboundedSender<ProviderEvent>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            let api_key = self
+                .credentials
+                .resolve(&CredentialTarget::OpenAi, None)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Missing OpenAI API key. Set OPENAI_API_KEY or run `rosie auth add openai`."
+                    )
+                })?
+                .secret;
+
+            let request_body = OpenAiChatRequest {
+                model: request.model,
+                messages: request
+                    .messages
+                    .into_iter()
+                    .map(|message| OpenAiMessage {
+                        role: message.role.as_str().to_string(),
+                        content: message.content,
+                    })
+                    .collect(),
+                stream: true,
+            };
+
+            let mut resp = reqwest::Client::new()
+                .post(format!(
+                    "{}/chat/completions",
+                    self.endpoint.trim_end_matches('/')
+                ))
+                .bearer_auth(api_key)
+                .json(&request_body)
+                .send()
+                .await
+                .map_err(|e| anyhow!("HTTP send error: {e}"))?;
+
+            if !resp.status().is_success() {
+                return Err(anyhow!(
+                    "API returned {}: {}",
+                    resp.status(),
+                    resp.text().await?
+                ));
+            }
+
+            let mut buffer = String::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| anyhow!("Stream read error: {e}"))?
+            {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim().to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    parse_openai_stream_line(&line, &tx)?;
+                }
+            }
+
+            if !buffer.trim().is_empty() {
+                parse_openai_stream_line(buffer.trim(), &tx)?;
+            }
+
+            let _ = tx.send(ProviderEvent::Done);
+            Ok(())
+        })
+    }
 }
 
 fn role_from_str(value: &str) -> Role {
@@ -182,4 +275,23 @@ fn role_from_str(value: &str) -> Role {
         "tool" => Role::Tool,
         _ => Role::User,
     }
+}
+
+fn parse_openai_stream_line(line: &str, tx: &mpsc::UnboundedSender<ProviderEvent>) -> Result<()> {
+    let payload = line.strip_prefix("data: ").unwrap_or(line).trim();
+    if payload == "[DONE]" {
+        let _ = tx.send(ProviderEvent::Done);
+        return Ok(());
+    }
+
+    let parsed: OpenAiStreamResponse =
+        serde_json::from_str(payload).map_err(|e| anyhow!("Failed to parse stream JSON: {e}"))?;
+    for choice in parsed.choices {
+        if let Some(content) = choice.delta.content
+            && !content.is_empty()
+        {
+            let _ = tx.send(ProviderEvent::Token(content));
+        }
+    }
+    Ok(())
 }

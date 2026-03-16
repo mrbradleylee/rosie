@@ -242,7 +242,7 @@ OpenAI and Anthropic endpoints must use HTTPS. OpenAI-compatible endpoints may u
 by default; other non-HTTPS hosts require
 .BR allow_insecure_http " = true" .
 .PP
-Current provider integration is partial: `--ask` and `--cmd` support the provider runtime, and the TUI currently requires an Ollama active provider.
+Rosie routes `--ask`, `--cmd`, and TUI chat through the configured provider runtime. TUI model discovery depends on whether the active provider supports listing models.
 .SH FILES
 .TP
 .I ~/.config/rosie/config.toml

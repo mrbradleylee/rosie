@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::StoredConfig;
 use crate::theme::{DEFAULT_THEME_KEY, default_theme, resolve_theme};
 use std::fs;
 use std::path::PathBuf;
@@ -27,11 +28,9 @@ fn build_app_from_store(
         .unwrap_or(0);
     let resolved = default_theme();
     AppState::new(AppStateInit {
+        config: StoredConfig::default(),
+        provider_name: "ollama".to_string(),
         host: "http://localhost:11434".to_string(),
-        ollama_client: reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .expect("build test ollama client"),
         model: "test-model".to_string(),
         default_model: "test-model".to_string(),
         theme_key: resolved.key,

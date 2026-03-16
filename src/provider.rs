@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -47,6 +48,12 @@ pub struct ChatResponse {
     pub message: Message,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderEvent {
+    Token(String),
+    Done,
+}
+
 pub trait Provider: Send + Sync {
     fn provider_type(&self) -> &'static str;
     fn default_model(&self) -> Option<&str>;
@@ -55,6 +62,21 @@ pub trait Provider: Send + Sync {
         &self,
         request: ChatRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ChatResponse>> + Send + '_>>;
+
+    fn stream_chat(
+        &self,
+        request: ChatRequest,
+        tx: mpsc::UnboundedSender<ProviderEvent>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            let response = self.chat(request).await?;
+            if !response.message.content.is_empty() {
+                let _ = tx.send(ProviderEvent::Token(response.message.content));
+            }
+            let _ = tx.send(ProviderEvent::Done);
+            Ok(())
+        })
+    }
 
     fn list_models(&self) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + '_>> {
         Box::pin(async move {
@@ -130,6 +152,18 @@ impl ProviderRouter {
 
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
         self.provider.chat(request).await
+    }
+
+    pub async fn list_models(&self) -> Result<Vec<String>> {
+        self.provider.list_models().await
+    }
+
+    pub async fn stream_chat(
+        &self,
+        request: ChatRequest,
+        tx: mpsc::UnboundedSender<ProviderEvent>,
+    ) -> Result<()> {
+        self.provider.stream_chat(request, tx).await
     }
 }
 

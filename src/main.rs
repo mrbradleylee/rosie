@@ -104,27 +104,8 @@ async fn main() -> Result<()> {
 
 async fn launch_tui(runtime_model: Option<&str>) -> Result<()> {
     let config = load_config()?;
-    let (_provider_name, provider) = config.active_provider_entry()?;
-    let (host, default_model) = match provider {
-        ProviderConfig::Ollama { endpoint, model } => (endpoint.clone(), model.clone()),
-        other => {
-            return Err(anyhow!(
-                "TUI provider support for {:?} has not landed yet; use an Ollama active provider for now",
-                other
-            ));
-        }
-    };
-    let model = runtime_model.map(str::to_owned).or(default_model);
-    let model = match model {
-        Some(value) => value,
-        None => discover_ollama_models(&host)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                anyhow!("No Ollama models found. Run `ollama pull <model>` and retry.")
-            })?,
-    };
+    let provider_router = provider::ProviderRouter::from_config(&config)?;
+    let model = provider_router.resolve_model(runtime_model).await?;
 
     let data_dir = app_data_dir()?;
     fs::create_dir_all(&data_dir)?;
@@ -139,7 +120,7 @@ async fn launch_tui(runtime_model: Option<&str>) -> Result<()> {
     let resolved_theme = resolve_theme(&theme_key, &config_dir)?;
 
     tui::run(
-        &host,
+        config,
         &model,
         &resolved_theme.key,
         resolved_theme.palette,

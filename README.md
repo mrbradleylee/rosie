@@ -19,7 +19,7 @@ Running `rosie` with no mode flag launches the full-screen TUI chat interface (l
 - Local install helper via `rosie -install`
 - Cross-platform Rust binary (Linux/macOS/Windows with Rust toolchain)
 
-`--ask` and `--cmd` now work with Ollama, OpenAI, Anthropic, and OpenAI-compatible providers. The TUI still expects the active provider to be Ollama in this phase.
+Rosie now routes `--ask`, `--cmd`, and TUI chat through Ollama, OpenAI, Anthropic, and OpenAI-compatible providers.
 
 ## Installation
 
@@ -88,7 +88,7 @@ In the default TUI:
 - from landing, type and press `Enter` to begin chatting, use `Ctrl+P`/`:` for command palette, and `F1` for help
 - once in chat, `Normal` mode is active by default
 - press `i` to enter `Insert` mode
-- in `Insert`, type in the composer, use `Backspace` to edit, and press `Enter` to send to Ollama
+- in `Insert`, type in the composer, use `Backspace` to edit, and press `Enter` to send to the active provider
 - press `Esc` to return to `Normal`
 - assistant tokens stream into transcript as they arrive
 - use `j`/`k` (or arrow keys) in `Normal` to scroll transcript
@@ -102,7 +102,7 @@ In the default TUI:
 - press `:` or `Ctrl+P` to open the floating command panel, then run:
   - `:help`
   - `:session` (open session manager modal)
-  - `:models` (open model picker from Ollama `/api/tags` for the active session)
+  - `:models` (open model picker for the active provider when model discovery is supported)
   - `:theme` (open picker from config dir themes)
   - `:theme <name>` (set TUI theme directly)
   - `:quit`
@@ -113,8 +113,6 @@ In the default TUI:
 - selected models are persisted per session and restored when you switch sessions/restart
 - press `Esc` in `Normal` to cancel an in-flight request
 - `Ctrl+C` quits from any mode
-
-The TUI currently expects the active provider to be Ollama during this first provider refactor pass.
 
 Transcript and composer text are wrapped to pane width so output stays constrained to visible layout bounds.
 Assistant output includes lightweight markdown rendering (headings/lists/quotes/rules/inline emphasis/code/links) and fenced code blocks are framed and syntax-highlighted when possible.

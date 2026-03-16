@@ -1,10 +1,11 @@
 use crate::credentials::{CredentialManager, CredentialTarget};
-use crate::provider::{ChatRequest, ChatResponse, Message, Provider, Role};
+use crate::provider::{ChatRequest, ChatResponse, Message, Provider, ProviderEvent, Role};
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
+use tokio::sync::mpsc;
 
 pub struct OpenAiCompatibleProvider {
     provider_name: String,
@@ -40,6 +41,8 @@ impl OpenAiCompatibleProvider {
 struct ChatCompletionsRequest {
     model: String,
     messages: Vec<OpenAiCompatibleMessage>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -74,6 +77,21 @@ struct ModelItem {
     id: String,
 }
 
+#[derive(Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
+}
+
+#[derive(Deserialize)]
+struct StreamDelta {
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StreamResponse {
+    choices: Vec<StreamChoice>,
+}
+
 impl Provider for OpenAiCompatibleProvider {
     fn provider_type(&self) -> &'static str {
         "openai-compatible"
@@ -101,6 +119,7 @@ impl Provider for OpenAiCompatibleProvider {
                         content: message.content,
                     })
                     .collect(),
+                stream: false,
             };
 
             let client = reqwest::Client::new();
@@ -178,6 +197,78 @@ impl Provider for OpenAiCompatibleProvider {
             Ok(response.data.into_iter().map(|item| item.id).collect())
         })
     }
+
+    fn stream_chat(
+        &self,
+        request: ChatRequest,
+        tx: mpsc::UnboundedSender<ProviderEvent>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            let auth = resolve_auth(&self.credentials, &self.credential_target())?;
+            validate_compatible_endpoint(&self.endpoint, self.allow_insecure_http, auth.is_some())?;
+
+            let request_body = ChatCompletionsRequest {
+                model: request.model,
+                messages: request
+                    .messages
+                    .into_iter()
+                    .map(|message| OpenAiCompatibleMessage {
+                        role: message.role.as_str().to_string(),
+                        content: message.content,
+                    })
+                    .collect(),
+                stream: true,
+            };
+
+            let client = reqwest::Client::new();
+            let request = client.post(format!(
+                "{}/chat/completions",
+                self.endpoint.trim_end_matches('/')
+            ));
+            let request = if let Some(secret) = auth {
+                request.bearer_auth(secret)
+            } else {
+                request
+            };
+            let mut resp = request
+                .json(&request_body)
+                .send()
+                .await
+                .map_err(|e| anyhow!("HTTP send error: {e}"))?;
+
+            if !resp.status().is_success() {
+                return Err(anyhow!(
+                    "API returned {}: {}",
+                    resp.status(),
+                    resp.text().await?
+                ));
+            }
+
+            let mut buffer = String::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| anyhow!("Stream read error: {e}"))?
+            {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim().to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    parse_stream_line(&line, &tx)?;
+                }
+            }
+
+            if !buffer.trim().is_empty() {
+                parse_stream_line(buffer.trim(), &tx)?;
+            }
+
+            let _ = tx.send(ProviderEvent::Done);
+            Ok(())
+        })
+    }
 }
 
 pub fn validate_compatible_endpoint(
@@ -244,6 +335,25 @@ fn role_from_str(value: &str) -> Role {
         "tool" => Role::Tool,
         _ => Role::User,
     }
+}
+
+fn parse_stream_line(line: &str, tx: &mpsc::UnboundedSender<ProviderEvent>) -> Result<()> {
+    let payload = line.strip_prefix("data: ").unwrap_or(line).trim();
+    if payload == "[DONE]" {
+        let _ = tx.send(ProviderEvent::Done);
+        return Ok(());
+    }
+
+    let parsed: StreamResponse =
+        serde_json::from_str(payload).map_err(|e| anyhow!("Failed to parse stream JSON: {e}"))?;
+    for choice in parsed.choices {
+        if let Some(content) = choice.delta.content
+            && !content.is_empty()
+        {
+            let _ = tx.send(ProviderEvent::Token(content));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

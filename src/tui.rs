@@ -1,3 +1,8 @@
+use crate::config::{ProviderConfig, StoredConfig};
+use crate::provider::{
+    ChatRequest as ProviderChatRequest, Message as ProviderMessage, ProviderEvent, ProviderRouter,
+    Role as ProviderRole,
+};
 use crate::theme::{ThemePalette, config_dir_from_env, discover_config_theme_names, resolve_theme};
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -29,7 +34,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub fn run(
-    host: &str,
+    config: StoredConfig,
     model: &str,
     theme_key: &str,
     theme: ThemePalette,
@@ -41,7 +46,7 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, host, model, theme_key, theme, db_path);
+    let result = run_loop(&mut terminal, config, model, theme_key, theme, db_path);
     let cleanup_result = cleanup_terminal(&mut terminal);
 
     result.and(cleanup_result)
@@ -49,8 +54,9 @@ pub fn run(
 
 struct AppState {
     mode: InputMode,
+    config: StoredConfig,
+    provider_name: String,
     host: String,
-    ollama_client: reqwest::Client,
     default_model: String,
     model: String,
     composer_input: String,
@@ -92,8 +98,9 @@ struct AppState {
 }
 
 struct AppStateInit {
+    config: StoredConfig,
+    provider_name: String,
     host: String,
-    ollama_client: reqwest::Client,
     model: String,
     default_model: String,
     theme_key: String,
@@ -109,8 +116,9 @@ impl AppState {
     fn new(init: AppStateInit) -> Self {
         Self {
             mode: InputMode::Normal,
+            config: init.config,
+            provider_name: init.provider_name,
             host: init.host,
-            ollama_client: init.ollama_client,
             default_model: init.default_model,
             model: init.model,
             composer_input: String::new(),
@@ -481,7 +489,7 @@ struct InFlightTitleFetch {
 
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    host: &str,
+    config: StoredConfig,
     model: &str,
     theme_key: &str,
     theme: ThemePalette,
@@ -503,9 +511,13 @@ fn run_loop(
         .iter()
         .position(|item| item.id == active_session_id)
         .unwrap_or(0);
+    let (provider_name, _provider) = config.active_provider_entry()?;
+    let provider_name = provider_name.to_string();
+    let cache_key = provider_cache_key(&config)?;
     let mut app = AppState::new(AppStateInit {
-        host: host.to_string(),
-        ollama_client: reqwest::Client::new(),
+        config,
+        provider_name,
+        host: cache_key,
         model: active_model,
         default_model: model.to_string(),
         theme_key: theme_key.to_string(),
@@ -1351,11 +1363,11 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
         let popup = centered_rect(70, 12, frame.area());
         let mut rows = Vec::new();
         if app.model_loading {
-            rows.push("Loading models from Ollama...".to_string());
+            rows.push(format!("Loading models from {}...", app.provider_name));
         } else if let Some(error) = app.model_error.as_deref() {
             rows.push(format!("Failed to load models: {error}"));
         } else if app.model_options.is_empty() {
-            rows.push("No models available from /api/tags".to_string());
+            rows.push(format!("No models available from {}.", app.provider_name));
         } else {
             rows.push("Select a model (Enter to apply):".to_string());
             rows.push(String::new());
@@ -1471,13 +1483,11 @@ fn submit_composer_message(app: &mut AppState) {
     });
 
     let (tx, rx) = mpsc::unbounded_channel();
-    let host = app.host.clone();
+    let config = app.config.clone();
     let model = app.model.clone();
-    let client = app.ollama_client.clone();
 
     let handle = tokio::spawn(async move {
-        if let Err(err) =
-            stream_ollama_chat(&client, &host, &model, request_messages, tx.clone()).await
+        if let Err(err) = stream_provider_chat(&config, &model, request_messages, tx.clone()).await
         {
             let _ = tx.send(StreamEvent::Error(err.to_string()));
         }
@@ -1492,7 +1502,7 @@ fn submit_composer_message(app: &mut AppState) {
     app.mode = InputMode::Normal;
     app.transcript_follow = true;
     refresh_sessions(app, Some(app.active_session_id), false);
-    app.status_message = "Sending request to Ollama...".to_string();
+    app.status_message = format!("Sending request to {}...", app.provider_name);
 }
 
 fn create_fresh_session_for_landing_submit(app: &mut AppState) -> bool {
@@ -1586,14 +1596,13 @@ fn start_generated_session_title(
         return;
     };
     let (tx, rx) = mpsc::unbounded_channel();
-    let host = app.host.clone();
+    let config = app.config.clone();
     let model = app.model.clone();
-    let client = app.ollama_client.clone();
     let expected_title = expected_title.to_string();
     let first_user_message = first_user_message.to_string();
     let handle = runtime.spawn(async move {
         if let Ok(generated_title) =
-            generate_session_title(&client, &host, &model, &first_user_message).await
+            generate_session_title(&config, &model, &first_user_message).await
         {
             let _ = tx.send(TitleFetchEvent::Generated {
                 session_id,
@@ -2410,13 +2419,12 @@ fn open_model_picker(app: &mut AppState) {
     app.model_options.clear();
     app.model_selected_index = 0;
     app.model_loading = true;
-    app.status_message = "Loading models from Ollama...".to_string();
+    app.status_message = format!("Loading models from {}...", app.provider_name);
 
     let (tx, rx) = mpsc::unbounded_channel();
-    let host = app.host.clone();
-    let client = app.ollama_client.clone();
+    let config = app.config.clone();
     let handle = runtime.spawn(async move {
-        match fetch_ollama_models(&client, &host).await {
+        match fetch_provider_models(&config).await {
             Ok(models) => {
                 let _ = tx.send(ModelFetchEvent::Loaded(models));
             }
@@ -3611,173 +3619,96 @@ fn jump_to_prev_assistant_block(app: &mut AppState) {
     app.status_message = "Jumped to previous assistant block.".to_string();
 }
 
-#[derive(Serialize)]
-struct OllamaChatRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    stream: bool,
-}
-
-#[derive(Serialize)]
-struct OllamaGenerateRequest {
-    model: String,
-    prompt: String,
-    stream: bool,
-}
-
-#[derive(Deserialize)]
-struct OllamaChatChunk {
-    message: Option<OllamaChunkMessage>,
-    done: Option<bool>,
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct OllamaChunkMessage {
-    content: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct OllamaGenerateResponse {
-    response: Option<String>,
-    error: Option<String>,
-}
-
-async fn stream_ollama_chat(
-    client: &reqwest::Client,
-    host: &str,
+async fn stream_provider_chat(
+    config: &StoredConfig,
     model: &str,
     messages: Vec<ChatMessage>,
     tx: mpsc::UnboundedSender<StreamEvent>,
 ) -> Result<()> {
-    let url = format!("{}/api/chat", host.trim_end_matches('/'));
-    let request = OllamaChatRequest {
+    let router = ProviderRouter::from_config(config)?;
+    let request = ProviderChatRequest {
         model: model.to_string(),
-        messages,
-        stream: true,
+        messages: messages
+            .into_iter()
+            .map(provider_message_from_chat)
+            .collect(),
+        temperature: None,
     };
-
-    let mut resp = client
-        .post(url)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| anyhow!("HTTP send error: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "Ollama returned {}: {}",
-            resp.status(),
-            resp.text()
-                .await
-                .unwrap_or_else(|_| "<no body>".to_string())
-        ));
-    }
-
-    let mut buffer = String::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| anyhow!("Stream read error: {e}"))?
-    {
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].trim().to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-            if line.is_empty() {
-                continue;
+    let (provider_tx, mut provider_rx) = mpsc::unbounded_channel();
+    let forwarder = tokio::spawn(async move {
+        while let Some(event) = provider_rx.recv().await {
+            match event {
+                ProviderEvent::Token(content) => {
+                    let _ = tx.send(StreamEvent::Token(content));
+                }
+                ProviderEvent::Done => {
+                    let _ = tx.send(StreamEvent::Done);
+                }
             }
-            parse_and_emit_line(&line, &tx)?;
         }
-    }
-
-    let remainder = buffer.trim();
-    if !remainder.is_empty() {
-        parse_and_emit_line(remainder, &tx)?;
-    }
-
-    let _ = tx.send(StreamEvent::Done);
-    Ok(())
+    });
+    let result = router.stream_chat(request, provider_tx).await;
+    let _ = forwarder.await;
+    result
 }
 
-async fn fetch_ollama_models(client: &reqwest::Client, host: &str) -> Result<Vec<String>> {
-    #[derive(Deserialize)]
-    struct OllamaModel {
-        name: String,
-    }
-
-    #[derive(Deserialize)]
-    struct OllamaTagsResponse {
-        models: Vec<OllamaModel>,
-    }
-
-    let url = format!("{}/api/tags", host.trim_end_matches('/'));
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| anyhow!("HTTP send error for model discovery: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "Model discovery returned {}: {}",
-            resp.status(),
-            resp.text()
-                .await
-                .unwrap_or_else(|_| "<no body>".to_string())
-        ));
-    }
-
-    let parsed: OllamaTagsResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("Failed to parse model discovery JSON: {e}"))?;
-
-    Ok(parsed.models.into_iter().map(|model| model.name).collect())
+async fn fetch_provider_models(config: &StoredConfig) -> Result<Vec<String>> {
+    let router = ProviderRouter::from_config(config)?;
+    router.list_models().await
 }
 
 async fn generate_session_title(
-    client: &reqwest::Client,
-    host: &str,
+    config: &StoredConfig,
     model: &str,
     first_user_message: &str,
 ) -> Result<String> {
+    let router = ProviderRouter::from_config(config)?;
     let prompt = format!(
         "Create a concise session title from this user message.\nRules:\n- 3 to 6 words\n- Title Case\n- No quotes\n- No ending punctuation\n- Keep it specific\nReturn only the title.\n\nUser message:\n{}",
         first_user_message.trim()
     );
-    let request = OllamaGenerateRequest {
-        model: model.to_string(),
-        prompt,
-        stream: false,
+    let response = router
+        .chat(ProviderChatRequest {
+            model: model.to_string(),
+            messages: vec![ProviderMessage {
+                role: ProviderRole::User,
+                content: prompt,
+            }],
+            temperature: None,
+        })
+        .await?;
+    Ok(response.message.content)
+}
+
+fn provider_message_from_chat(message: ChatMessage) -> ProviderMessage {
+    ProviderMessage {
+        role: match message.role.as_str() {
+            "system" => ProviderRole::System,
+            "assistant" => ProviderRole::Assistant,
+            "tool" => ProviderRole::Tool,
+            _ => ProviderRole::User,
+        },
+        content: message.content,
+    }
+}
+
+fn provider_cache_key(config: &StoredConfig) -> Result<String> {
+    let (provider_name, provider) = config.active_provider_entry()?;
+    let key = match provider {
+        ProviderConfig::Ollama { endpoint, .. } => format!("{provider_name}:{endpoint}"),
+        ProviderConfig::OpenAi { endpoint, .. } => format!(
+            "{provider_name}:{}",
+            endpoint.as_deref().unwrap_or("https://api.openai.com/v1")
+        ),
+        ProviderConfig::Anthropic { endpoint, .. } => format!(
+            "{provider_name}:{}",
+            endpoint
+                .as_deref()
+                .unwrap_or("https://api.anthropic.com/v1/messages")
+        ),
+        ProviderConfig::OpenAiCompatible { endpoint, .. } => format!("{provider_name}:{endpoint}"),
     };
-    let url = format!("{}/api/generate", host.trim_end_matches('/'));
-    let resp = client
-        .post(url)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| anyhow!("HTTP send error for title generation: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "Title generation returned {}: {}",
-            resp.status(),
-            resp.text()
-                .await
-                .unwrap_or_else(|_| "<no body>".to_string())
-        ));
-    }
-    let parsed: OllamaGenerateResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("Failed to parse title generation JSON: {e}"))?;
-    if let Some(error) = parsed.error
-        && !error.trim().is_empty()
-    {
-        return Err(anyhow!("Title generation error: {error}"));
-    }
-    Ok(parsed.response.unwrap_or_default())
+    Ok(key)
 }
 
 fn normalize_generated_title(raw: &str) -> String {
@@ -3802,29 +3733,6 @@ fn normalize_generated_title(raw: &str) -> String {
         out.pop();
     }
     out
-}
-
-fn parse_and_emit_line(line: &str, tx: &mpsc::UnboundedSender<StreamEvent>) -> Result<()> {
-    let parsed: OllamaChatChunk =
-        serde_json::from_str(line).map_err(|e| anyhow!("Failed to parse stream JSON: {e}"))?;
-
-    if let Some(error) = parsed.error {
-        let _ = tx.send(StreamEvent::Error(error));
-        return Ok(());
-    }
-
-    if let Some(message) = parsed.message
-        && let Some(content) = message.content
-        && !content.is_empty()
-    {
-        let _ = tx.send(StreamEvent::Token(content));
-    }
-
-    if parsed.done.unwrap_or(false) {
-        let _ = tx.send(StreamEvent::Done);
-    }
-
-    Ok(())
 }
 
 fn cleanup_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {

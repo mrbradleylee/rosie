@@ -14,9 +14,9 @@ This document reflects shipped behavior in the current codebase.
 
 `--ask` and `--cmd` are mutually exclusive.
 
-Current limitation:
-- `--ask` and `--cmd` are wired through the multi-provider runtime
-- the TUI currently requires the active provider to be Ollama
+Current provider scope:
+- `--ask`, `--cmd`, and TUI chat are wired through the multi-provider runtime
+- model discovery in the TUI depends on whether the active provider supports listing models
 
 ## CLI/config behavior
 
