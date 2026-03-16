@@ -71,7 +71,7 @@ impl SecretStore for KeyringStore {
 
     fn delete_secret(&self, target: &CredentialTarget) -> Result<()> {
         let entry = keyring::Entry::new(KEYRING_SERVICE, &account_name(target))?;
-        match entry.delete_password() {
+        match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(err) => Err(anyhow!("Keychain delete failed: {err}")),
         }
