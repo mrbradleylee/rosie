@@ -144,6 +144,17 @@ fn apply_cached_model_options_uses_recent_cache() {
     let _ = fs::remove_file(&db_path);
 }
 
+#[test]
+fn trailing_visible_text_tracks_the_input_tail() {
+    let (visible, cursor) = trailing_visible_text("hello", 10);
+    assert_eq!(visible, "hello");
+    assert_eq!(cursor, 5);
+
+    let (visible, cursor) = trailing_visible_text("abcdefghijklmnopqrstuvwxyz", 8);
+    assert_eq!(visible, "stuvwxyz");
+    assert_eq!(cursor, 8);
+}
+
 #[tokio::test]
 async fn open_model_picker_uses_manual_entry_when_discovery_is_unavailable() {
     let db_path = temp_db_path("model-picker-manual-entry");

@@ -1052,7 +1052,13 @@ fn render_landing(
         .wrap(Wrap { trim: false });
     frame.render_widget(hero, landing_layout[0]);
 
-    let prompt = Paragraph::new(app.composer_input.as_str())
+    let visible_prompt = trailing_visible_text(
+        &app.composer_input,
+        landing_layout[2].width.saturating_sub(2) as usize,
+    )
+    .0
+    .to_string();
+    let prompt = Paragraph::new(visible_prompt)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1083,7 +1089,8 @@ fn render_landing(
         horizontal: 1,
         vertical: 1,
     });
-    let cursor_offset = app.composer_input.chars().count() as u16;
+    let (_, cursor_offset) =
+        trailing_visible_text(&app.composer_input, prompt_inner.width as usize);
     let cursor_x = prompt_inner.x + cursor_offset.min(prompt_inner.width.saturating_sub(1));
     frame.set_cursor_position((cursor_x, prompt_inner.y));
 }
@@ -1148,7 +1155,10 @@ fn render_main_panes(
     let transcript = transcript_base.scroll((app.transcript_scroll, 0));
     frame.render_widget(transcript, transcript_area);
 
-    let composer = Paragraph::new(app.composer_input.as_str())
+    let visible_composer = trailing_visible_text(&app.composer_input, composer_area.width as usize)
+        .0
+        .to_string();
+    let composer = Paragraph::new(visible_composer)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1182,7 +1192,8 @@ fn render_main_panes(
             horizontal: 1,
             vertical: 1,
         });
-        let cursor_offset = app.composer_input.chars().count() as u16;
+        let (_, cursor_offset) =
+            trailing_visible_text(&app.composer_input, composer_inner.width as usize);
         let cursor_x = composer_inner.x + cursor_offset.min(composer_inner.width.saturating_sub(1));
         frame.set_cursor_position((cursor_x, composer_inner.y));
     }
@@ -1270,12 +1281,14 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
     if app.mode == InputMode::CommandPalette {
         let popup = centered_rect(70, 12, frame.area());
         let mut rows: Vec<Line<'_>> = Vec::new();
+        let command_inner_width = popup.width.saturating_sub(2) as usize;
+        let visible_command =
+            trailing_visible_text(&app.command_input, command_inner_width.saturating_sub(1))
+                .0
+                .to_string();
         rows.push(Line::from(vec![
             Span::styled(":", Style::default().fg(theme.title_meta)),
-            Span::styled(
-                app.command_input.clone(),
-                Style::default().fg(theme.title_value_alt),
-            ),
+            Span::styled(visible_command, Style::default().fg(theme.title_value_alt)),
         ]));
         rows.push(Line::raw(""));
         rows.push(Line::styled(
@@ -1339,6 +1352,14 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
             .wrap(Wrap { trim: false });
         frame.render_widget(Clear, popup);
         frame.render_widget(command, popup);
+        let inner = popup.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        let (_, cursor_offset) =
+            trailing_visible_text(&app.command_input, command_inner_width.saturating_sub(1));
+        let cursor_x = inner.x + (1 + cursor_offset).min(inner.width.saturating_sub(1));
+        frame.set_cursor_position((cursor_x, inner.y));
     } else if app.mode == InputMode::SessionManager || app.mode == InputMode::SessionRename {
         let popup = centered_rect(90, 18, frame.area());
         let rows = session_manager_rows(app, popup.height as usize);
@@ -1356,7 +1377,11 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
                 horizontal: 1,
                 vertical: 1,
             });
-            let cursor_offset = app.session_rename_input.chars().count() as u16;
+            let prefix_width = 9usize;
+            let (_, cursor_offset) = trailing_visible_text(
+                &app.session_rename_input,
+                inner.width.saturating_sub(prefix_width as u16) as usize,
+            );
             let cursor_x = inner.x + (9 + cursor_offset).min(inner.width.saturating_sub(1));
             let cursor_y = inner.y + 2;
             frame.set_cursor_position((cursor_x, cursor_y));
@@ -1395,13 +1420,17 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
         if app.model_loading {
             rows.push(format!("Loading models from {}...", app.provider_name));
         } else if app.model_manual_entry {
+            let visible_model =
+                trailing_visible_text(&app.model_input, popup.width.saturating_sub(4) as usize)
+                    .0
+                    .to_string();
             rows.push(format!(
                 "Model discovery isn't available for {}.",
                 app.provider_name
             ));
             rows.push("Enter a model name and press Enter to apply it:".to_string());
             rows.push(String::new());
-            rows.push(format!("> {}", app.model_input));
+            rows.push(format!("> {}", visible_model));
         } else if let Some(error) = app.model_error.as_deref() {
             rows.push(format!("Failed to load models: {error}"));
         } else if app.model_options.is_empty() {
@@ -1428,6 +1457,17 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
             .wrap(Wrap { trim: false });
         frame.render_widget(Clear, popup);
         frame.render_widget(picker, popup);
+        if app.model_manual_entry {
+            let inner = popup.inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            let (_, cursor_offset) =
+                trailing_visible_text(&app.model_input, popup.width.saturating_sub(4) as usize);
+            let cursor_x = inner.x + (2 + cursor_offset).min(inner.width.saturating_sub(1));
+            let cursor_y = inner.y + 3;
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
     } else if app.mode == InputMode::ThemeSelect {
         let popup = centered_rect(70, 12, frame.area());
         let mut rows = Vec::new();
@@ -2067,11 +2107,32 @@ fn truncate_with_ellipsis(value: &str, max_width: usize) -> String {
     out
 }
 
+fn trailing_visible_text(value: &str, width: usize) -> (&str, u16) {
+    if width == 0 {
+        return ("", 0);
+    }
+
+    let total_chars = value.chars().count();
+    if total_chars <= width {
+        return (value, total_chars as u16);
+    }
+
+    let start_byte = value
+        .char_indices()
+        .nth(total_chars.saturating_sub(width))
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    (&value[start_byte..], width as u16)
+}
+
 fn session_manager_rows(app: &mut AppState, view_height: usize) -> Vec<String> {
     let mut rows = vec!["Enter to apply | [n] new [r] rename [d] delete | Esc close".to_string()];
     if app.mode == InputMode::SessionRename {
+        let visible_rename = trailing_visible_text(&app.session_rename_input, 62)
+            .0
+            .to_string();
         rows.push(String::new());
-        rows.push(format!("Rename: {}", app.session_rename_input));
+        rows.push(format!("Rename: {}", visible_rename));
     }
     if app.sessions.is_empty() {
         rows.push("No sessions".to_string());
