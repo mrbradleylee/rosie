@@ -139,10 +139,10 @@ to quit from any mode.
 Prompts can be supplied as trailing arguments or from standard input. If neither is provided in an interactive terminal, Rosie prompts for one line of input.
 .SH OPTIONS
 .TP
-.B --configure
+.B --config
 Interactively create or update local configuration in
 .I ~/.config/rosie/config.toml
-(including Ollama host and model defaults).
+(including active provider selection and provider settings).
 .TP
 .B --install
 Install the current binary into the local bin directory, install this man page into the local man directory, and sync bundled themes into
@@ -168,7 +168,7 @@ Display version information and exit.
 .BR -h , " --help"
 Print help information.
 .SH CONFIGURATION
-Rosie uses file-based configuration for host/model defaults:
+Rosie uses file-based configuration:
 .TP
 .I ~/.config/rosie/config.toml
 (or
@@ -179,22 +179,16 @@ is set).
 .PP
 Supported keys:
 .TP
-.B ollama_host
-Ollama base URL (default:
-.I http://localhost:11434 )
+.B active_provider
+Name of the provider entry Rosie should use.
 .TP
-.B default_model
-Global model fallback
-.TP
-.B ask_model
-Mode-specific default for
-.B --ask
-(optional)
-.TP
-.B cmd_model
-Mode-specific default for
-.B --cmd
-(optional)
+.B [providers.<name>]
+Named provider definitions, including provider
+.B type
+and provider-specific fields such as
+.B endpoint
+and
+.B model
 .TP
 .B theme
 TUI theme name (built-in or file-based) loaded from
@@ -216,20 +210,17 @@ Model resolution order:
 .IP "1." 4
 .B --model
 .IP "2." 4
-mode-specific default (
-.B ask_model
-or
-.B cmd_model )
+active provider
+.B model
 .IP "3." 4
-.B default_model
-.IP "4." 4
-first local Ollama model discovered via
-.I /api/tags
+first provider-discovered model when supported
+.PP
+Current provider integration is partial: Ollama is wired end-to-end in this first pass, and the TUI currently requires an Ollama active provider.
 .SH FILES
 .TP
 .I ~/.config/rosie/config.toml
 Persistent local configuration written by
-.BR rosie " --configure" .
+.BR rosie " --config" .
 .TP
 .I ${XDG_DATA_HOME}/rosie/sessions.sqlite3
 Session/message persistence database used by TUI mode.
@@ -251,7 +242,7 @@ is unset.
 .SH EXAMPLES
 .TP
 Configure Rosie:
-.B rosie --configure
+.B rosie --config
 .TP
 Install Rosie:
 .B rosie --install

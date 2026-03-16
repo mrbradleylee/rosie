@@ -14,22 +14,23 @@ This document reflects shipped behavior in the current codebase.
 
 `--ask` and `--cmd` are mutually exclusive.
 
+Current limitation:
+- the provider abstraction exists, but only Ollama is wired for live requests in this first integration pass
+- the TUI currently requires the active provider to be Ollama
+
 ## CLI/config behavior
 
 - Config path:
   - `${XDG_CONFIG_HOME:-~/.config}/rosie/config.toml`
 - Core keys:
-  - `ollama_host`
-  - `default_model`
-  - `ask_model`
-  - `cmd_model`
+  - `active_provider`
+  - `[providers.<name>]`
   - `theme`
   - `execution_enabled`
 - Model resolution order:
   1. `--model`
-  2. mode-specific config (`ask_model`/`cmd_model`) where applicable
-  3. `default_model`
-  4. first available Ollama model from `/api/tags`
+  2. active provider config `model`
+  3. first provider-discovered model when supported
 
 ## TUI flow
 

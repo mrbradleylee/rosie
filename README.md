@@ -13,10 +13,12 @@ Running `rosie` with no mode flag launches the full-screen TUI chat interface (l
 - Default no-flag TUI chat mode with persisted local sessions
 - Built-in TUI themes with runtime switching (`:theme`)
 - `--model <MODEL>` runtime model override for both `--ask` and `--cmd`
-- Config-driven Ollama host/model defaults in `~/.config/rosie/config.toml`
-- Interactive `--configure` flow with model discovery from Ollama
+- Provider-driven model defaults in `~/.config/rosie/config.toml`
+- Interactive `--config` flow with provider-aware setup
 - Local install helper via `rosie -install`
 - Cross-platform Rust binary (Linux/macOS/Windows with Rust toolchain)
+
+The provider foundation is in place, but this first integration pass only wires Ollama end-to-end. Other provider types are part of the new config shape, but their live request and auth flows are still follow-up work.
 
 ## Installation
 
@@ -46,8 +48,8 @@ By default Rosie installs itself into `~/.local/bin/rosie` (or `$XDG_BIN_HOME/ro
 # Default entrypoint (TUI chat mode)
 rosie
 
-# Configure Ollama host and model defaults
-rosie -configure
+# Configure Rosie provider settings
+rosie --config
 
 # Install current binary
 rosie -install
@@ -106,6 +108,8 @@ In the default TUI:
 - press `Esc` in `Normal` to cancel an in-flight request
 - `Ctrl+C` quits from any mode
 
+The TUI currently expects the active provider to be Ollama during this first provider refactor pass.
+
 Transcript and composer text are wrapped to pane width so output stays constrained to visible layout bounds.
 Assistant output includes lightweight markdown rendering (headings/lists/quotes/rules/inline emphasis/code/links) and fenced code blocks are framed and syntax-highlighted when possible.
 TUI sessions/messages are persisted in local SQLite at:
@@ -114,7 +118,7 @@ TUI sessions/messages are persisted in local SQLite at:
 
 ## Configuration
 
-Rosie configuration is file-based (no environment override path for host/model selection).
+Rosie configuration is file-based.
 
 Config file path:
 - `~/.config/rosie/config.toml`
@@ -123,14 +127,12 @@ Config file path:
 Preferred setup flow:
 
 ```bash
-rosie -configure
+rosie --config
 ```
 
 That command creates/updates config and prompts for:
-- `ollama_host`
-- `default_model`
-- `ask_model` (optional)
-- `cmd_model` (optional)
+- `active_provider`
+- one provider block under `[providers.<name>]`
 - `execution_enabled` (controls whether execute is allowed in `--cmd`)
 
 Theme is controlled in TUI with `:theme` and persisted into config as `theme`.
@@ -140,12 +142,14 @@ Packaged defaults include Rose Pine variants (`rose-pine`, `rose-pine-moon`, `ro
 Example config:
 
 ```toml
-ollama_host = "http://localhost:11434"
-default_model = "llama3.2"
-ask_model = "llama3.2"
-cmd_model = "qwen2.5-coder"
+active_provider = "ollama"
 theme = "<built-in-or-file-theme-name>"
 execution_enabled = true
+
+[providers.ollama]
+type = "ollama"
+endpoint = "http://localhost:11434"
+model = "llama3.2"
 ```
 
 Theme file schema (preferred):
@@ -193,9 +197,8 @@ Legacy `[colors]` files are still supported for backward compatibility.
 
 Model resolution order:
 1. `--model`
-2. mode-specific model (`ask_model` / `cmd_model`)
-3. `default_model`
-4. first available local Ollama model from `/api/tags`
+2. active provider `model`
+3. first available provider-discovered model when supported
 
 If no model can be resolved, Rosie exits with an actionable error.
 

@@ -4,18 +4,18 @@ mod config;
 mod install;
 mod llm;
 mod paths;
+mod provider;
+mod providers;
 mod theme;
 mod tui;
 
 use anyhow::{Result, anyhow};
-use cli::parse_args;
-use config::{StoredConfig, load_config};
+use cli::{AuthAction, Command as CliCommand, parse_args};
+use config::{ProviderConfig, StoredConfig, load_config};
 use install::install;
-use llm::{
-    DEFAULT_OLLAMA_HOST, GeneratedCommand, discover_ollama_models, generate_chat_with_spinner,
-    generate_command_with_spinner,
-};
+use llm::{GeneratedCommand, generate_chat_with_spinner, generate_command_with_spinner};
 use paths::{app_data_dir, config_path};
+use providers::ollama::{DEFAULT_OLLAMA_ENDPOINT, discover_ollama_models};
 use std::env;
 use std::fs;
 use std::io;
@@ -39,13 +39,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if args.configure {
+    if args.config {
         configure().await?;
         return Ok(());
     }
 
     if args.install {
         install(MAN_PAGE)?;
+        return Ok(());
+    }
+
+    if let Some(command) = args.command {
+        handle_command(command)?;
         return Ok(());
     }
 
@@ -95,14 +100,17 @@ async fn main() -> Result<()> {
 
 async fn launch_tui(runtime_model: Option<&str>) -> Result<()> {
     let config = load_config()?;
-    let host = config
-        .ollama_host
-        .as_deref()
-        .unwrap_or(DEFAULT_OLLAMA_HOST)
-        .to_string();
-    let model = runtime_model
-        .map(str::to_owned)
-        .or_else(|| config.effective_default_model());
+    let (_provider_name, provider) = config.active_provider_entry()?;
+    let (host, default_model) = match provider {
+        ProviderConfig::Ollama { endpoint, model } => (endpoint.clone(), model.clone()),
+        other => {
+            return Err(anyhow!(
+                "TUI provider support for {:?} has not landed yet; use an Ollama active provider for now",
+                other
+            ));
+        }
+    };
+    let model = runtime_model.map(str::to_owned).or(default_model);
     let model = match model {
         Some(value) => value,
         None => discover_ollama_models(&host)
@@ -262,16 +270,127 @@ async fn configure() -> Result<()> {
 
     println!("Rosie configuration");
     println!("Press enter to keep the current value.");
-    let ollama_host = prompt_config_value(
-        "Ollama host",
-        existing
-            .ollama_host
-            .as_deref()
-            .or(Some(DEFAULT_OLLAMA_HOST)),
-        true,
+    let (existing_name, existing_provider) = existing.active_provider_entry()?;
+    let current_provider_kind = provider_type_label(existing_provider);
+    let provider_kind = prompt_provider_kind(current_provider_kind)?;
+    let provider_name = prompt_config_value("Provider name", Some(existing_name), false)?;
+    let provider = configure_provider(provider_kind, existing_provider).await?;
+    let theme = existing
+        .theme
+        .clone()
+        .unwrap_or_else(|| default_theme().key);
+    let execution_enabled = prompt_bool_config_value(
+        "Enable command execution for --cmd",
+        existing.execution_enabled.unwrap_or(true),
     )?;
 
-    let discovered_models = match discover_ollama_models(&ollama_host).await {
+    let config = StoredConfig {
+        active_provider: Some(provider_name.clone()),
+        providers: std::iter::once((provider_name, provider)).collect(),
+        theme: Some(theme),
+        execution_enabled: Some(execution_enabled),
+    };
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let serialized = toml::to_string_pretty(&config)?;
+    fs::write(&path, serialized)?;
+
+    println!("Saved configuration to {}", path.display());
+    Ok(())
+}
+
+fn handle_command(command: CliCommand) -> Result<()> {
+    match command {
+        CliCommand::Auth(auth) => match auth.action {
+            AuthAction::Add { provider } => Err(anyhow!(
+                "`rosie auth add {provider}` is planned but not implemented in this first iteration"
+            )),
+            AuthAction::List => Err(anyhow!(
+                "`rosie auth list` is planned but not implemented in this first iteration"
+            )),
+            AuthAction::Remove { provider } => Err(anyhow!(
+                "`rosie auth remove {provider}` is planned but not implemented in this first iteration"
+            )),
+        },
+    }
+}
+
+fn provider_type_label(provider: &ProviderConfig) -> &'static str {
+    match provider {
+        ProviderConfig::Ollama { .. } => "ollama",
+        ProviderConfig::OpenAi { .. } => "openai",
+        ProviderConfig::Anthropic { .. } => "anthropic",
+        ProviderConfig::OpenAiCompatible { .. } => "openai-compatible",
+    }
+}
+
+fn prompt_provider_kind(current: &str) -> Result<String> {
+    loop {
+        let value = prompt_config_value(
+            "Provider type (ollama/openai/anthropic/openai-compatible)",
+            Some(current),
+            false,
+        )?;
+        match value.as_str() {
+            "ollama" | "openai" | "anthropic" | "openai-compatible" => return Ok(value),
+            _ => println!("Enter one of: ollama, openai, anthropic, openai-compatible."),
+        }
+    }
+}
+
+async fn configure_provider(
+    provider_kind: String,
+    existing_provider: &ProviderConfig,
+) -> Result<ProviderConfig> {
+    match provider_kind.as_str() {
+        "ollama" => configure_ollama_provider(existing_provider).await,
+        "openai" => {
+            let current_model = match existing_provider {
+                ProviderConfig::OpenAi { model } => model.as_deref(),
+                _ => None,
+            };
+            Ok(ProviderConfig::OpenAi {
+                model: normalize_config_value(prompt_config_value("Model", current_model, false)?),
+            })
+        }
+        "anthropic" => {
+            let current_model = match existing_provider {
+                ProviderConfig::Anthropic { model } => model.as_deref(),
+                _ => None,
+            };
+            Ok(ProviderConfig::Anthropic {
+                model: normalize_config_value(prompt_config_value("Model", current_model, false)?),
+            })
+        }
+        "openai-compatible" => {
+            let (current_endpoint, current_model) = match existing_provider {
+                ProviderConfig::OpenAiCompatible { endpoint, model } => {
+                    (Some(endpoint.as_str()), model.as_deref())
+                }
+                _ => (None, None),
+            };
+            let endpoint = prompt_config_value("Endpoint", current_endpoint, false)?;
+            let model = prompt_config_value("Model", current_model, false)?;
+            Ok(ProviderConfig::OpenAiCompatible {
+                endpoint,
+                model: normalize_config_value(model),
+            })
+        }
+        _ => Err(anyhow!("Unsupported provider type '{}'", provider_kind)),
+    }
+}
+
+async fn configure_ollama_provider(existing_provider: &ProviderConfig) -> Result<ProviderConfig> {
+    let (current_endpoint, current_model) = match existing_provider {
+        ProviderConfig::Ollama { endpoint, model } => (Some(endpoint.as_str()), model.as_deref()),
+        _ => (Some(DEFAULT_OLLAMA_ENDPOINT), None),
+    };
+    let endpoint = prompt_config_value("Ollama endpoint", current_endpoint, false)?;
+
+    let discovered_models = match discover_ollama_models(&endpoint).await {
         Ok(models) => {
             println!();
             println!("Available models:");
@@ -291,81 +410,22 @@ async fn configure() -> Result<()> {
             if prompt_continue_or_exit(&message)? {
                 None
             } else {
-                return Ok(());
+                return Err(anyhow!("Configuration cancelled"));
             }
         }
     };
 
-    let default_model = match discovered_models.as_deref() {
-        Some(models) if !models.is_empty() => prompt_model_with_confirmation(
-            "Default model",
-            existing.effective_default_model().as_deref(),
-            true,
-            models,
-            None,
-        )?,
-        _ => prompt_config_value(
-            "Default model",
-            existing.effective_default_model().as_deref(),
-            true,
-        )?,
-    };
-    let ask_model = match discovered_models.as_deref() {
-        Some(models) if !models.is_empty() => prompt_model_with_confirmation(
-            "Ask model (optional, falls back to default model)",
-            existing.ask_model.as_deref(),
-            true,
-            models,
-            Some("(fallback to default model)"),
-        )?,
-        _ => prompt_config_value(
-            "Ask model (optional, falls back to default model)",
-            existing.ask_model.as_deref(),
-            true,
-        )?,
-    };
-    let cmd_model = match discovered_models.as_deref() {
-        Some(models) if !models.is_empty() => prompt_model_with_confirmation(
-            "Cmd model (optional, falls back to default model)",
-            existing.cmd_model.as_deref(),
-            true,
-            models,
-            Some("(fallback to default model)"),
-        )?,
-        _ => prompt_config_value(
-            "Cmd model (optional, falls back to default model)",
-            existing.cmd_model.as_deref(),
-            true,
-        )?,
-    };
-    let theme = existing
-        .theme
-        .clone()
-        .unwrap_or_else(|| default_theme().key);
-    let execution_enabled = prompt_bool_config_value(
-        "Enable command execution for --cmd",
-        existing.execution_enabled.unwrap_or(true),
-    )?;
-
-    let config = StoredConfig {
-        ollama_host: normalize_config_value(ollama_host),
-        default_model: normalize_config_value(default_model),
-        ask_model: normalize_config_value(ask_model),
-        cmd_model: normalize_config_value(cmd_model),
-        theme: Some(theme),
-        execution_enabled: Some(execution_enabled),
-        legacy_model: None,
+    let model = match discovered_models.as_deref() {
+        Some(models) if !models.is_empty() => {
+            prompt_model_with_confirmation("Default model", current_model, true, models, None)?
+        }
+        _ => prompt_config_value("Default model", current_model, true)?,
     };
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let serialized = toml::to_string_pretty(&config)?;
-    fs::write(&path, serialized)?;
-
-    println!("Saved configuration to {}", path.display());
-    Ok(())
+    Ok(ProviderConfig::Ollama {
+        endpoint,
+        model: normalize_config_value(model),
+    })
 }
 
 fn prompt_config_value(label: &str, current: Option<&str>, allow_empty: bool) -> Result<String> {

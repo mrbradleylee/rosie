@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Replaced the legacy flat provider config with `active_provider` plus `[providers.<name>]` blocks, and reject legacy-only config files at runtime
+- Added a shared provider abstraction layer and routed `--ask` / `--cmd` through it, with Ollama implemented in the first integration pass
+- Renamed the interactive setup flag from `--configure` to `--config`
+
 ## 0.8.3
 
 ### Changed
