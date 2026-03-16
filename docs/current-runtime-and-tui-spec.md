@@ -14,22 +14,27 @@ This document reflects shipped behavior in the current codebase.
 
 `--ask` and `--cmd` are mutually exclusive.
 
+Current provider scope:
+- `--ask`, `--cmd`, and TUI chat are wired through the multi-provider runtime
+- model discovery in the TUI depends on whether the active provider supports listing models
+
 ## CLI/config behavior
 
 - Config path:
   - `${XDG_CONFIG_HOME:-~/.config}/rosie/config.toml`
 - Core keys:
-  - `ollama_host`
-  - `default_model`
-  - `ask_model`
-  - `cmd_model`
+  - `active_provider`
+  - `[providers.<name>]`
   - `theme`
   - `execution_enabled`
+- Auth commands:
+  - `rosie auth add <provider>`
+  - `rosie auth list`
+  - `rosie auth remove <provider>`
 - Model resolution order:
   1. `--model`
-  2. mode-specific config (`ask_model`/`cmd_model`) where applicable
-  3. `default_model`
-  4. first available Ollama model from `/api/tags`
+  2. active provider config `model`
+  3. first provider-discovered model when supported
 
 ## TUI flow
 

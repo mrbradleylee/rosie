@@ -1,11 +1,11 @@
 use clap::Parser;
-use std::ffi::OsStr;
 
 #[derive(Parser, Debug)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Args {
-    /// Configure stored Ollama settings
+    /// Configure stored Rosie settings
     #[arg(long)]
-    pub configure: bool,
+    pub config: bool,
 
     /// Install the current binary into a local bin directory
     #[arg(long)]
@@ -30,25 +30,30 @@ pub struct Args {
     /// Display version information (short form: -V)
     #[arg(short = 'V', long)]
     pub version: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum Command {
+    /// Manage stored provider credentials
+    Auth(AuthCommand),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AuthCommand {
+    #[command(subcommand)]
+    pub action: AuthAction,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum AuthAction {
+    Add { provider: String },
+    List,
+    Remove { provider: String },
 }
 
 pub fn parse_args() -> Args {
-    Args::parse_from(rewrite_legacy_flags(std::env::args_os()))
-}
-
-fn rewrite_legacy_flags<I>(args: I) -> Vec<std::ffi::OsString>
-where
-    I: IntoIterator<Item = std::ffi::OsString>,
-{
-    args.into_iter()
-        .map(|arg| {
-            if arg == OsStr::new("-configure") {
-                "--configure".into()
-            } else if arg == OsStr::new("-install") {
-                "--install".into()
-            } else {
-                arg
-            }
-        })
-        .collect()
+    Args::parse()
 }

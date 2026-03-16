@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Changed
+
+- Replaced the legacy flat provider config with `active_provider` plus `[providers.<name>]` blocks, and reject legacy-only config files at runtime
+- Added OpenAI, Anthropic, and OpenAI-compatible provider implementations on top of the shared provider abstraction for `--ask` / `--cmd`
+- Added OS keychain-backed `rosie auth add|list|remove` credential management with environment-variable overrides
+- Added transport validation for remote providers, including HTTPS enforcement for OpenAI/Anthropic and guarded HTTP exceptions for local OpenAI-compatible hosts
+- Routed TUI chat, model discovery, and auto-title generation through the shared provider runtime so non-Ollama providers can be used in the TUI as well
+- Updated `:models` to adapt per provider by using discovered model lists when available and manual model entry when discovery is unsupported
+- Updated long TUI text inputs to keep the visible text window aligned with the cursor instead of overflowing past the input box
+- Upgraded `ratatui`, `reqwest`, and `keyring`, and replaced `syntect` code highlighting with a narrower tree-sitter-based implementation to clear the remaining audit warnings
+- Renamed the interactive setup flag from `--configure` to `--config`
+
 ## 0.8.3
 
 ### Changed

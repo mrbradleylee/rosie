@@ -1,3 +1,8 @@
+use crate::config::{ProviderConfig, StoredConfig};
+use crate::provider::{
+    ChatRequest as ProviderChatRequest, Message as ProviderMessage, ProviderEvent, ProviderRouter,
+    Role as ProviderRole,
+};
 use crate::theme::{ThemePalette, config_dir_from_env, discover_config_theme_names, resolve_theme};
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -22,14 +27,13 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme as SyntectTheme, ThemeSet};
-use syntect::parsing::SyntaxSet;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tree_sitter::Language;
+use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 
 pub fn run(
-    host: &str,
+    config: StoredConfig,
     model: &str,
     theme_key: &str,
     theme: ThemePalette,
@@ -41,7 +45,7 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, host, model, theme_key, theme, db_path);
+    let result = run_loop(&mut terminal, config, model, theme_key, theme, db_path);
     let cleanup_result = cleanup_terminal(&mut terminal);
 
     result.and(cleanup_result)
@@ -49,8 +53,9 @@ pub fn run(
 
 struct AppState {
     mode: InputMode,
+    config: StoredConfig,
+    provider_name: String,
     host: String,
-    ollama_client: reqwest::Client,
     default_model: String,
     model: String,
     composer_input: String,
@@ -77,6 +82,8 @@ struct AppState {
     model_options: Vec<String>,
     model_selected_index: usize,
     model_loading: bool,
+    model_manual_entry: bool,
+    model_input: String,
     model_error: Option<String>,
     model_cache: Vec<String>,
     model_cache_host: Option<String>,
@@ -92,8 +99,9 @@ struct AppState {
 }
 
 struct AppStateInit {
+    config: StoredConfig,
+    provider_name: String,
     host: String,
-    ollama_client: reqwest::Client,
     model: String,
     default_model: String,
     theme_key: String,
@@ -109,8 +117,9 @@ impl AppState {
     fn new(init: AppStateInit) -> Self {
         Self {
             mode: InputMode::Normal,
+            config: init.config,
+            provider_name: init.provider_name,
             host: init.host,
-            ollama_client: init.ollama_client,
             default_model: init.default_model,
             model: init.model,
             composer_input: String::new(),
@@ -137,6 +146,8 @@ impl AppState {
             model_options: Vec::new(),
             model_selected_index: 0,
             model_loading: false,
+            model_manual_entry: false,
+            model_input: String::new(),
             model_error: None,
             model_cache: Vec::new(),
             model_cache_host: None,
@@ -160,7 +171,7 @@ impl AppState {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InputMode {
     Landing,
     Normal,
@@ -481,7 +492,7 @@ struct InFlightTitleFetch {
 
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    host: &str,
+    config: StoredConfig,
     model: &str,
     theme_key: &str,
     theme: ThemePalette,
@@ -503,9 +514,13 @@ fn run_loop(
         .iter()
         .position(|item| item.id == active_session_id)
         .unwrap_or(0);
+    let (provider_name, _provider) = config.active_provider_entry()?;
+    let provider_name = provider_name.to_string();
+    let cache_key = provider_cache_key(&config)?;
     let mut app = AppState::new(AppStateInit {
-        host: host.to_string(),
-        ollama_client: reqwest::Client::new(),
+        config,
+        provider_name,
+        host: cache_key,
         model: active_model,
         default_model: model.to_string(),
         theme_key: theme_key.to_string(),
@@ -807,6 +822,25 @@ fn handle_confirm_delete_input(app: &mut AppState, key: KeyEvent) -> bool {
 }
 
 fn handle_model_select_input(app: &mut AppState, key: KeyEvent) -> bool {
+    if app.model_manual_entry {
+        match key.code {
+            KeyCode::Esc => {
+                cancel_model_fetch(app);
+                app.mode = primary_mode_for_app(app);
+                app.status_message = "Model picker cancelled.".to_string();
+            }
+            KeyCode::Enter => apply_selected_model(app),
+            KeyCode::Backspace => {
+                app.model_input.pop();
+            }
+            KeyCode::Char(ch) => {
+                app.model_input.push(ch);
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     match key.code {
         KeyCode::Esc => {
             cancel_model_fetch(app);
@@ -1018,7 +1052,13 @@ fn render_landing(
         .wrap(Wrap { trim: false });
     frame.render_widget(hero, landing_layout[0]);
 
-    let prompt = Paragraph::new(app.composer_input.as_str())
+    let visible_prompt = trailing_visible_text(
+        &app.composer_input,
+        landing_layout[2].width.saturating_sub(2) as usize,
+    )
+    .0
+    .to_string();
+    let prompt = Paragraph::new(visible_prompt)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1049,7 +1089,8 @@ fn render_landing(
         horizontal: 1,
         vertical: 1,
     });
-    let cursor_offset = app.composer_input.chars().count() as u16;
+    let (_, cursor_offset) =
+        trailing_visible_text(&app.composer_input, prompt_inner.width as usize);
     let cursor_x = prompt_inner.x + cursor_offset.min(prompt_inner.width.saturating_sub(1));
     frame.set_cursor_position((cursor_x, prompt_inner.y));
 }
@@ -1114,7 +1155,10 @@ fn render_main_panes(
     let transcript = transcript_base.scroll((app.transcript_scroll, 0));
     frame.render_widget(transcript, transcript_area);
 
-    let composer = Paragraph::new(app.composer_input.as_str())
+    let visible_composer = trailing_visible_text(&app.composer_input, composer_area.width as usize)
+        .0
+        .to_string();
+    let composer = Paragraph::new(visible_composer)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1148,7 +1192,8 @@ fn render_main_panes(
             horizontal: 1,
             vertical: 1,
         });
-        let cursor_offset = app.composer_input.chars().count() as u16;
+        let (_, cursor_offset) =
+            trailing_visible_text(&app.composer_input, composer_inner.width as usize);
         let cursor_x = composer_inner.x + cursor_offset.min(composer_inner.width.saturating_sub(1));
         frame.set_cursor_position((cursor_x, composer_inner.y));
     }
@@ -1169,7 +1214,9 @@ fn mode_label(mode: InputMode) -> &'static str {
     }
 }
 
-fn footer_help_for_mode(mode: InputMode, is_busy: bool) -> &'static str {
+fn footer_help_for_mode(app: &AppState) -> &'static str {
+    let mode = app.mode;
+    let is_busy = app.is_busy();
     match mode {
         InputMode::Landing => "Type message | Enter send | Ctrl+P/: cmd | ?: help",
         InputMode::Normal => {
@@ -1186,17 +1233,23 @@ fn footer_help_for_mode(mode: InputMode, is_busy: bool) -> &'static str {
         }
         InputMode::SessionRename => "Type title | Enter save | Esc cancel",
         InputMode::ConfirmDelete => "Confirm delete: Enter/y=yes, n/Esc=no",
-        InputMode::ModelSelect => "Model picker: j/k move | Enter select | Esc cancel",
+        InputMode::ModelSelect => {
+            if app.model_manual_entry {
+                "Model picker: type name | Enter apply | Esc cancel"
+            } else {
+                "Model picker: j/k move | Enter select | Esc cancel"
+            }
+        }
         InputMode::ThemeSelect => "Theme picker: j/k move | Enter select | Esc cancel",
         InputMode::Help => "Help: Esc/q/? close",
     }
 }
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Rect, theme: ThemePalette) {
-    let footer_help = footer_help_for_mode(app.mode, app.is_busy());
+    let footer_help = footer_help_for_mode(app);
     let footer_width = area.width as usize;
     let compact_help = if footer_width < 80 {
-        compact_footer_help(app.mode, app.is_busy())
+        compact_footer_help(app)
     } else {
         footer_help.to_string()
     };
@@ -1228,12 +1281,14 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
     if app.mode == InputMode::CommandPalette {
         let popup = centered_rect(70, 12, frame.area());
         let mut rows: Vec<Line<'_>> = Vec::new();
+        let command_inner_width = popup.width.saturating_sub(2) as usize;
+        let visible_command =
+            trailing_visible_text(&app.command_input, command_inner_width.saturating_sub(1))
+                .0
+                .to_string();
         rows.push(Line::from(vec![
             Span::styled(":", Style::default().fg(theme.title_meta)),
-            Span::styled(
-                app.command_input.clone(),
-                Style::default().fg(theme.title_value_alt),
-            ),
+            Span::styled(visible_command, Style::default().fg(theme.title_value_alt)),
         ]));
         rows.push(Line::raw(""));
         rows.push(Line::styled(
@@ -1297,6 +1352,14 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
             .wrap(Wrap { trim: false });
         frame.render_widget(Clear, popup);
         frame.render_widget(command, popup);
+        let inner = popup.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        let (_, cursor_offset) =
+            trailing_visible_text(&app.command_input, command_inner_width.saturating_sub(1));
+        let cursor_x = inner.x + (1 + cursor_offset).min(inner.width.saturating_sub(1));
+        frame.set_cursor_position((cursor_x, inner.y));
     } else if app.mode == InputMode::SessionManager || app.mode == InputMode::SessionRename {
         let popup = centered_rect(90, 18, frame.area());
         let rows = session_manager_rows(app, popup.height as usize);
@@ -1314,7 +1377,11 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
                 horizontal: 1,
                 vertical: 1,
             });
-            let cursor_offset = app.session_rename_input.chars().count() as u16;
+            let prefix_width = 9usize;
+            let (_, cursor_offset) = trailing_visible_text(
+                &app.session_rename_input,
+                inner.width.saturating_sub(prefix_width as u16) as usize,
+            );
             let cursor_x = inner.x + (9 + cursor_offset).min(inner.width.saturating_sub(1));
             let cursor_y = inner.y + 2;
             frame.set_cursor_position((cursor_x, cursor_y));
@@ -1351,11 +1418,23 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
         let popup = centered_rect(70, 12, frame.area());
         let mut rows = Vec::new();
         if app.model_loading {
-            rows.push("Loading models from Ollama...".to_string());
+            rows.push(format!("Loading models from {}...", app.provider_name));
+        } else if app.model_manual_entry {
+            let visible_model =
+                trailing_visible_text(&app.model_input, popup.width.saturating_sub(4) as usize)
+                    .0
+                    .to_string();
+            rows.push(format!(
+                "Model discovery isn't available for {}.",
+                app.provider_name
+            ));
+            rows.push("Enter a model name and press Enter to apply it:".to_string());
+            rows.push(String::new());
+            rows.push(format!("> {}", visible_model));
         } else if let Some(error) = app.model_error.as_deref() {
             rows.push(format!("Failed to load models: {error}"));
         } else if app.model_options.is_empty() {
-            rows.push("No models available from /api/tags".to_string());
+            rows.push(format!("No models available from {}.", app.provider_name));
         } else {
             rows.push("Select a model (Enter to apply):".to_string());
             rows.push(String::new());
@@ -1378,6 +1457,17 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
             .wrap(Wrap { trim: false });
         frame.render_widget(Clear, popup);
         frame.render_widget(picker, popup);
+        if app.model_manual_entry {
+            let inner = popup.inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            let (_, cursor_offset) =
+                trailing_visible_text(&app.model_input, popup.width.saturating_sub(4) as usize);
+            let cursor_x = inner.x + (2 + cursor_offset).min(inner.width.saturating_sub(1));
+            let cursor_y = inner.y + 3;
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
     } else if app.mode == InputMode::ThemeSelect {
         let popup = centered_rect(70, 12, frame.area());
         let mut rows = Vec::new();
@@ -1471,13 +1561,11 @@ fn submit_composer_message(app: &mut AppState) {
     });
 
     let (tx, rx) = mpsc::unbounded_channel();
-    let host = app.host.clone();
+    let config = app.config.clone();
     let model = app.model.clone();
-    let client = app.ollama_client.clone();
 
     let handle = tokio::spawn(async move {
-        if let Err(err) =
-            stream_ollama_chat(&client, &host, &model, request_messages, tx.clone()).await
+        if let Err(err) = stream_provider_chat(&config, &model, request_messages, tx.clone()).await
         {
             let _ = tx.send(StreamEvent::Error(err.to_string()));
         }
@@ -1492,7 +1580,7 @@ fn submit_composer_message(app: &mut AppState) {
     app.mode = InputMode::Normal;
     app.transcript_follow = true;
     refresh_sessions(app, Some(app.active_session_id), false);
-    app.status_message = "Sending request to Ollama...".to_string();
+    app.status_message = format!("Sending request to {}...", app.provider_name);
 }
 
 fn create_fresh_session_for_landing_submit(app: &mut AppState) -> bool {
@@ -1586,14 +1674,13 @@ fn start_generated_session_title(
         return;
     };
     let (tx, rx) = mpsc::unbounded_channel();
-    let host = app.host.clone();
+    let config = app.config.clone();
     let model = app.model.clone();
-    let client = app.ollama_client.clone();
     let expected_title = expected_title.to_string();
     let first_user_message = first_user_message.to_string();
     let handle = runtime.spawn(async move {
         if let Ok(generated_title) =
-            generate_session_title(&client, &host, &model, &first_user_message).await
+            generate_session_title(&config, &model, &first_user_message).await
         {
             let _ = tx.send(TitleFetchEvent::Generated {
                 session_id,
@@ -1830,6 +1917,8 @@ fn process_model_fetch_events(app: &mut AppState) {
             Ok(ModelFetchEvent::Loaded(models)) => {
                 app.model_options = models.clone();
                 app.model_loading = false;
+                app.model_manual_entry = false;
+                app.model_input.clear();
                 app.model_error = None;
                 app.model_cache = models;
                 app.model_cache_host = Some(app.host.clone());
@@ -1848,6 +1937,8 @@ fn process_model_fetch_events(app: &mut AppState) {
             }
             Ok(ModelFetchEvent::Error(message)) => {
                 app.model_loading = false;
+                app.model_manual_entry = false;
+                app.model_input.clear();
                 app.model_options.clear();
                 app.model_selected_index = 0;
                 app.model_error = Some(message.clone());
@@ -2016,11 +2107,32 @@ fn truncate_with_ellipsis(value: &str, max_width: usize) -> String {
     out
 }
 
+fn trailing_visible_text(value: &str, width: usize) -> (&str, u16) {
+    if width == 0 {
+        return ("", 0);
+    }
+
+    let total_chars = value.chars().count();
+    if total_chars <= width {
+        return (value, total_chars as u16);
+    }
+
+    let start_byte = value
+        .char_indices()
+        .nth(total_chars.saturating_sub(width))
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    (&value[start_byte..], width as u16)
+}
+
 fn session_manager_rows(app: &mut AppState, view_height: usize) -> Vec<String> {
     let mut rows = vec!["Enter to apply | [n] new [r] rename [d] delete | Esc close".to_string()];
     if app.mode == InputMode::SessionRename {
+        let visible_rename = trailing_visible_text(&app.session_rename_input, 62)
+            .0
+            .to_string();
         rows.push(String::new());
-        rows.push(format!("Rename: {}", app.session_rename_input));
+        rows.push(format!("Rename: {}", visible_rename));
     }
     if app.sessions.is_empty() {
         rows.push("No sessions".to_string());
@@ -2403,20 +2515,34 @@ fn open_model_picker(app: &mut AppState) {
     cancel_model_fetch(app);
     app.mode = InputMode::ModelSelect;
     app.model_error = None;
+    app.model_manual_entry = false;
+    app.model_input.clear();
     if apply_cached_model_options(app) {
         return;
+    }
+
+    match provider_supports_model_discovery(&app.config) {
+        Ok(true) => {}
+        Ok(false) => {
+            enter_manual_model_entry(app);
+            return;
+        }
+        Err(err) => {
+            app.mode = primary_mode_for_app(app);
+            app.status_message = format!("Model picker unavailable: {err}");
+            return;
+        }
     }
 
     app.model_options.clear();
     app.model_selected_index = 0;
     app.model_loading = true;
-    app.status_message = "Loading models from Ollama...".to_string();
+    app.status_message = format!("Loading models from {}...", app.provider_name);
 
     let (tx, rx) = mpsc::unbounded_channel();
-    let host = app.host.clone();
-    let client = app.ollama_client.clone();
+    let config = app.config.clone();
     let handle = runtime.spawn(async move {
-        match fetch_ollama_models(&client, &host).await {
+        match fetch_provider_models(&config).await {
             Ok(models) => {
                 let _ = tx.send(ModelFetchEvent::Loaded(models));
             }
@@ -2441,6 +2567,8 @@ fn apply_cached_model_options(app: &mut AppState) -> bool {
 
     app.model_options = app.model_cache.clone();
     app.model_loading = false;
+    app.model_manual_entry = false;
+    app.model_input.clear();
     app.model_selected_index = app
         .model_options
         .iter()
@@ -2506,9 +2634,19 @@ fn apply_selected_model(app: &mut AppState) {
         return;
     }
 
-    let Some(selected) = app.model_options.get(app.model_selected_index).cloned() else {
-        app.status_message = "No model selected.".to_string();
-        return;
+    let selected = if app.model_manual_entry {
+        let typed = app.model_input.trim();
+        if typed.is_empty() {
+            app.status_message = "Enter a model name first.".to_string();
+            return;
+        }
+        typed.to_string()
+    } else {
+        let Some(selected) = app.model_options.get(app.model_selected_index).cloned() else {
+            app.status_message = "No model selected.".to_string();
+            return;
+        };
+        selected
     };
     if !ensure_active_session_for_chat(app) {
         return;
@@ -2523,6 +2661,8 @@ fn apply_selected_model(app: &mut AppState) {
             app.sessions_dirty = true;
             refresh_sessions(app, Some(app.active_session_id), false);
             app.mode = primary_mode_for_app(app);
+            app.model_manual_entry = false;
+            app.model_input.clear();
             app.status_message = format!("Session model set to {selected}");
         }
         Err(err) => {
@@ -3068,7 +3208,7 @@ fn render_message_block(
 
     let content = message_content_for_render(message, is_busy, idx, total_messages);
     let mut in_code_block = false;
-    let mut code_highlighter: Option<HighlightLines<'static>> = None;
+    let mut code_language: Option<String> = None;
     let mut code_lines: Vec<String> = Vec::new();
     let mut wrote_any = false;
     let mut wrote_first_content_line = false;
@@ -3087,8 +3227,9 @@ fn render_message_block(
                     Span::styled("  ╭─ ".to_string(), ctx.rail_style),
                     Span::styled(code_label, ctx.rail_style.add_modifier(Modifier::BOLD)),
                 ]));
-                code_highlighter =
-                    build_code_highlighter(if lang.is_empty() { None } else { Some(lang) }, theme);
+                code_language =
+                    normalize_code_language(if lang.is_empty() { None } else { Some(lang) })
+                        .map(str::to_string);
                 code_lines.clear();
                 in_code_block = true;
                 wrote_any = true;
@@ -3096,12 +3237,12 @@ fn render_message_block(
                 flush_code_block(
                     &mut rows,
                     &code_lines,
-                    &mut code_highlighter,
+                    code_language.as_deref(),
                     &mut wrote_first_content_line,
                     &ctx,
                 );
                 code_lines.clear();
-                code_highlighter = None;
+                code_language = None;
                 in_code_block = false;
                 wrote_any = true;
             }
@@ -3129,7 +3270,7 @@ fn render_message_block(
         flush_code_block(
             &mut rows,
             &code_lines,
-            &mut code_highlighter,
+            code_language.as_deref(),
             &mut wrote_first_content_line,
             &ctx,
         );
@@ -3199,7 +3340,7 @@ fn message_content_for_render(
 fn flush_code_block(
     rows: &mut Vec<Line<'static>>,
     code_lines: &[String],
-    code_highlighter: &mut Option<HighlightLines<'static>>,
+    code_language: Option<&str>,
     wrote_first_content_line: &mut bool,
     ctx: &MessageRenderCtx<'_>,
 ) {
@@ -3208,7 +3349,10 @@ fn flush_code_block(
         .map(|l| l.chars().count())
         .max()
         .unwrap_or(0);
-    for (line_idx, code_line) in code_lines.iter().enumerate() {
+    let highlighted_lines =
+        highlighted_code_lines(code_lines, code_language, ctx.code_style, ctx.theme);
+    for (line_idx, highlighted_segments) in highlighted_lines.into_iter().enumerate() {
+        let code_line = code_lines.get(line_idx).map(String::as_str).unwrap_or("");
         let mut spans: Vec<Span<'static>> = Vec::new();
         if !ctx.is_assistant && !*wrote_first_content_line && line_idx == 0 {
             spans.push(Span::styled(
@@ -3221,11 +3365,11 @@ fn flush_code_block(
             spans.push(Span::styled(ctx.wrap_pad.to_string(), ctx.text_style));
         }
         spans.push(Span::styled("  │ ".to_string(), ctx.gutter_style));
-        spans.extend(highlighted_code_spans(
-            code_line,
-            code_highlighter,
-            ctx.code_style,
-        ));
+        if highlighted_segments.is_empty() {
+            spans.push(Span::styled(code_line.to_string(), ctx.code_style));
+        } else {
+            spans.extend(highlighted_segments);
+        }
         let pad = block_width.saturating_sub(code_line.chars().count());
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad), ctx.code_style));
@@ -3263,38 +3407,268 @@ fn push_non_assistant_text_line(
         ));
     }
 }
-fn syntax_assets() -> &'static (SyntaxSet, ThemeSet) {
-    static ASSETS: OnceLock<(SyntaxSet, ThemeSet)> = OnceLock::new();
-    ASSETS.get_or_init(|| {
-        (
-            SyntaxSet::load_defaults_newlines(),
-            ThemeSet::load_defaults(),
-        )
+const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
+    "attribute",
+    "comment",
+    "constant",
+    "constant.builtin",
+    "constructor",
+    "embedded",
+    "function",
+    "function.builtin",
+    "keyword",
+    "module",
+    "number",
+    "operator",
+    "property",
+    "punctuation",
+    "punctuation.bracket",
+    "punctuation.delimiter",
+    "string",
+    "string.special",
+    "tag",
+    "type",
+    "type.builtin",
+    "variable",
+    "variable.builtin",
+    "variable.parameter",
+];
+
+struct TreeSitterAssets {
+    rust: HighlightConfiguration,
+    python: HighlightConfiguration,
+    javascript: HighlightConfiguration,
+    typescript: HighlightConfiguration,
+    tsx: HighlightConfiguration,
+    json: HighlightConfiguration,
+    bash: HighlightConfiguration,
+    yaml: HighlightConfiguration,
+}
+
+fn syntax_assets() -> &'static TreeSitterAssets {
+    static ASSETS: OnceLock<TreeSitterAssets> = OnceLock::new();
+    ASSETS.get_or_init(|| TreeSitterAssets {
+        rust: build_highlight_config(
+            tree_sitter_rust::LANGUAGE.into(),
+            "rust",
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            tree_sitter_rust::INJECTIONS_QUERY,
+            "",
+        ),
+        python: build_highlight_config(
+            tree_sitter_python::LANGUAGE.into(),
+            "python",
+            tree_sitter_python::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        ),
+        javascript: build_highlight_config(
+            tree_sitter_javascript::LANGUAGE.into(),
+            "javascript",
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::INJECTIONS_QUERY,
+            tree_sitter_javascript::LOCALS_QUERY,
+        ),
+        typescript: build_highlight_config(
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            "typescript",
+            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            "",
+            tree_sitter_typescript::LOCALS_QUERY,
+        ),
+        tsx: build_highlight_config(
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+            "tsx",
+            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            "",
+            tree_sitter_typescript::LOCALS_QUERY,
+        ),
+        json: build_highlight_config(
+            tree_sitter_json::LANGUAGE.into(),
+            "json",
+            tree_sitter_json::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        ),
+        bash: build_highlight_config(
+            tree_sitter_bash::LANGUAGE.into(),
+            "bash",
+            tree_sitter_bash::HIGHLIGHT_QUERY,
+            "",
+            "",
+        ),
+        yaml: build_highlight_config(
+            tree_sitter_yaml::LANGUAGE.into(),
+            "yaml",
+            tree_sitter_yaml::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        ),
     })
 }
 
-fn build_code_highlighter(
-    language: Option<&str>,
-    theme: ThemePalette,
-) -> Option<HighlightLines<'static>> {
-    let (syntax_set, theme_set) = syntax_assets();
-    let syntax = language
-        .and_then(|lang| syntax_set.find_syntax_by_token(lang))
-        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
-    let syntect_theme = select_syntect_theme(theme_set, theme)?;
-    Some(HighlightLines::new(syntax, syntect_theme))
+fn build_highlight_config(
+    language: Language,
+    name: &str,
+    highlights_query: &str,
+    injections_query: &str,
+    locals_query: &str,
+) -> HighlightConfiguration {
+    let mut config = HighlightConfiguration::new(
+        language,
+        name,
+        highlights_query,
+        injections_query,
+        locals_query,
+    )
+    .expect("load tree-sitter highlight config");
+    config.configure(TREE_SITTER_HIGHLIGHT_NAMES);
+    config
 }
 
-fn select_syntect_theme(theme_set: &ThemeSet, theme: ThemePalette) -> Option<&SyntectTheme> {
-    let preferred = if relative_luminance(theme.base) < 0.5 {
-        "base16-ocean.dark"
-    } else {
-        "InspiredGitHub"
+fn normalize_code_language(language: Option<&str>) -> Option<&'static str> {
+    let lower = language?.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "bash" | "sh" | "shell" | "zsh" => Some("bash"),
+        "js" | "javascript" | "mjs" | "cjs" => Some("javascript"),
+        "json" => Some("json"),
+        "py" | "python" => Some("python"),
+        "rs" | "rust" => Some("rust"),
+        "ts" | "typescript" => Some("typescript"),
+        "tsx" => Some("tsx"),
+        "yaml" | "yml" => Some("yaml"),
+        _ => None,
+    }
+}
+
+fn highlight_config_for_language(
+    language: Option<&str>,
+) -> Option<&'static HighlightConfiguration> {
+    let assets = syntax_assets();
+    match normalize_code_language(language)? {
+        "bash" => Some(&assets.bash),
+        "javascript" => Some(&assets.javascript),
+        "json" => Some(&assets.json),
+        "python" => Some(&assets.python),
+        "rust" => Some(&assets.rust),
+        "tsx" => Some(&assets.tsx),
+        "typescript" => Some(&assets.typescript),
+        "yaml" => Some(&assets.yaml),
+        _ => None,
+    }
+}
+
+fn highlighted_code_lines(
+    code_lines: &[String],
+    language: Option<&str>,
+    fallback_style: Style,
+    theme: ThemePalette,
+) -> Vec<Vec<Span<'static>>> {
+    if code_lines.is_empty() {
+        return Vec::new();
+    }
+
+    let Some(config) = highlight_config_for_language(language) else {
+        return code_lines
+            .iter()
+            .map(|line| vec![Span::styled(line.to_string(), fallback_style)])
+            .collect();
     };
-    theme_set
-        .themes
-        .get(preferred)
-        .or_else(|| theme_set.themes.values().next())
+
+    let source = code_lines.join("\n");
+    let mut highlighter = Highlighter::new();
+    let Ok(events) = highlighter.highlight(config, source.as_bytes(), None, |_| None) else {
+        return code_lines
+            .iter()
+            .map(|line| vec![Span::styled(line.to_string(), fallback_style)])
+            .collect();
+    };
+
+    let mut lines = vec![Vec::new()];
+    let mut stack: Vec<Highlight> = Vec::new();
+
+    for event in events {
+        let Ok(event) = event else {
+            return code_lines
+                .iter()
+                .map(|line| vec![Span::styled(line.to_string(), fallback_style)])
+                .collect();
+        };
+        match event {
+            HighlightEvent::HighlightStart(highlight) => stack.push(highlight),
+            HighlightEvent::HighlightEnd => {
+                let _ = stack.pop();
+            }
+            HighlightEvent::Source { start, end } => {
+                let segment = &source[start..end];
+                let style = style_for_highlight(stack.last().copied(), fallback_style, theme);
+                append_highlighted_segment(&mut lines, segment, style);
+            }
+        }
+    }
+
+    while lines.len() < code_lines.len() {
+        lines.push(Vec::new());
+    }
+
+    lines
+}
+
+fn append_highlighted_segment(lines: &mut Vec<Vec<Span<'static>>>, segment: &str, style: Style) {
+    for (idx, piece) in segment.split('\n').enumerate() {
+        if idx > 0 {
+            lines.push(Vec::new());
+        }
+        if !piece.is_empty() {
+            lines
+                .last_mut()
+                .expect("at least one line")
+                .push(Span::styled(piece.to_string(), style));
+        }
+    }
+}
+
+fn style_for_highlight(
+    highlight: Option<Highlight>,
+    fallback_style: Style,
+    theme: ThemePalette,
+) -> Style {
+    let Some(Highlight(index)) = highlight else {
+        return fallback_style;
+    };
+    let Some(name) = TREE_SITTER_HIGHLIGHT_NAMES.get(index).copied() else {
+        return fallback_style;
+    };
+
+    let token_style = if name.starts_with("comment") {
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::ITALIC)
+    } else if name.starts_with("string") {
+        Style::default().fg(theme.warn)
+    } else if name.starts_with("keyword") || name.starts_with("operator") {
+        Style::default()
+            .fg(theme.title_value)
+            .add_modifier(Modifier::BOLD)
+    } else if name.starts_with("function") || name == "constructor" {
+        Style::default().fg(theme.title_value_alt)
+    } else if name.starts_with("type") || name == "attribute" {
+        Style::default().fg(theme.user)
+    } else if name.starts_with("number") || name.starts_with("constant") {
+        Style::default().fg(theme.info)
+    } else if name.starts_with("variable.parameter") {
+        Style::default()
+            .fg(theme.title_meta)
+            .add_modifier(Modifier::ITALIC)
+    } else if name.starts_with("punctuation") {
+        Style::default().fg(theme.title_meta)
+    } else if name == "tag" || name == "property" || name == "module" {
+        Style::default().fg(theme.assistant)
+    } else {
+        Style::default().fg(theme.text)
+    };
+
+    fallback_style.patch(token_style)
 }
 
 fn markdown_line_spans(line: &str, theme: ThemePalette) -> Vec<Span<'static>> {
@@ -3493,34 +3867,9 @@ fn parse_markdown_list_item(line: &str) -> Option<&str> {
     None
 }
 
-fn highlighted_code_spans(
-    line: &str,
-    highlighter: &mut Option<HighlightLines<'static>>,
-    fallback_style: Style,
-) -> Vec<Span<'static>> {
-    let Some(highlighter) = highlighter.as_mut() else {
-        return vec![Span::styled(line.to_string(), fallback_style)];
-    };
-    let (syntax_set, _) = syntax_assets();
-    let Ok(ranges) = highlighter.highlight_line(line, syntax_set) else {
-        return vec![Span::styled(line.to_string(), fallback_style)];
-    };
-    if ranges.is_empty() {
-        return vec![Span::styled(line.to_string(), fallback_style)];
-    }
-    ranges
-        .into_iter()
-        .map(|(style, segment)| {
-            let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
-            Span::styled(
-                segment.to_string(),
-                fallback_style.patch(Style::default().fg(fg)),
-            )
-        })
-        .collect()
-}
-
-fn compact_footer_help(mode: InputMode, is_busy: bool) -> String {
+fn compact_footer_help(app: &AppState) -> String {
+    let mode = app.mode;
+    let is_busy = app.is_busy();
     match mode {
         InputMode::Landing => "Enter send | Ctrl+P cmd".to_string(),
         InputMode::Normal => {
@@ -3535,7 +3884,13 @@ fn compact_footer_help(mode: InputMode, is_busy: bool) -> String {
         InputMode::SessionManager => "j/k move | Enter apply".to_string(),
         InputMode::SessionRename => "Type title | Enter save".to_string(),
         InputMode::ConfirmDelete => "Enter/y yes | n/Esc no".to_string(),
-        InputMode::ModelSelect => "j/k move | Enter select".to_string(),
+        InputMode::ModelSelect => {
+            if app.model_manual_entry {
+                "Type model | Enter apply".to_string()
+            } else {
+                "j/k move | Enter select".to_string()
+            }
+        }
         InputMode::ThemeSelect => "j/k move | Enter select".to_string(),
         InputMode::Help => "Esc/q/? close".to_string(),
     }
@@ -3611,173 +3966,113 @@ fn jump_to_prev_assistant_block(app: &mut AppState) {
     app.status_message = "Jumped to previous assistant block.".to_string();
 }
 
-#[derive(Serialize)]
-struct OllamaChatRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    stream: bool,
-}
-
-#[derive(Serialize)]
-struct OllamaGenerateRequest {
-    model: String,
-    prompt: String,
-    stream: bool,
-}
-
-#[derive(Deserialize)]
-struct OllamaChatChunk {
-    message: Option<OllamaChunkMessage>,
-    done: Option<bool>,
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct OllamaChunkMessage {
-    content: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct OllamaGenerateResponse {
-    response: Option<String>,
-    error: Option<String>,
-}
-
-async fn stream_ollama_chat(
-    client: &reqwest::Client,
-    host: &str,
+async fn stream_provider_chat(
+    config: &StoredConfig,
     model: &str,
     messages: Vec<ChatMessage>,
     tx: mpsc::UnboundedSender<StreamEvent>,
 ) -> Result<()> {
-    let url = format!("{}/api/chat", host.trim_end_matches('/'));
-    let request = OllamaChatRequest {
+    let router = ProviderRouter::from_config(config)?;
+    let request = ProviderChatRequest {
         model: model.to_string(),
-        messages,
-        stream: true,
+        messages: messages
+            .into_iter()
+            .map(provider_message_from_chat)
+            .collect(),
+        temperature: None,
     };
-
-    let mut resp = client
-        .post(url)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| anyhow!("HTTP send error: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "Ollama returned {}: {}",
-            resp.status(),
-            resp.text()
-                .await
-                .unwrap_or_else(|_| "<no body>".to_string())
-        ));
-    }
-
-    let mut buffer = String::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| anyhow!("Stream read error: {e}"))?
-    {
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].trim().to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-            if line.is_empty() {
-                continue;
+    let (provider_tx, mut provider_rx) = mpsc::unbounded_channel();
+    let forwarder = tokio::spawn(async move {
+        while let Some(event) = provider_rx.recv().await {
+            match event {
+                ProviderEvent::Token(content) => {
+                    let _ = tx.send(StreamEvent::Token(content));
+                }
+                ProviderEvent::Done => {
+                    let _ = tx.send(StreamEvent::Done);
+                }
             }
-            parse_and_emit_line(&line, &tx)?;
         }
-    }
-
-    let remainder = buffer.trim();
-    if !remainder.is_empty() {
-        parse_and_emit_line(remainder, &tx)?;
-    }
-
-    let _ = tx.send(StreamEvent::Done);
-    Ok(())
+    });
+    let result = router.stream_chat(request, provider_tx).await;
+    let _ = forwarder.await;
+    result
 }
 
-async fn fetch_ollama_models(client: &reqwest::Client, host: &str) -> Result<Vec<String>> {
-    #[derive(Deserialize)]
-    struct OllamaModel {
-        name: String,
-    }
+async fn fetch_provider_models(config: &StoredConfig) -> Result<Vec<String>> {
+    let router = ProviderRouter::from_config(config)?;
+    router.list_models().await
+}
 
-    #[derive(Deserialize)]
-    struct OllamaTagsResponse {
-        models: Vec<OllamaModel>,
-    }
-
-    let url = format!("{}/api/tags", host.trim_end_matches('/'));
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| anyhow!("HTTP send error for model discovery: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "Model discovery returned {}: {}",
-            resp.status(),
-            resp.text()
-                .await
-                .unwrap_or_else(|_| "<no body>".to_string())
-        ));
-    }
-
-    let parsed: OllamaTagsResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("Failed to parse model discovery JSON: {e}"))?;
-
-    Ok(parsed.models.into_iter().map(|model| model.name).collect())
+fn provider_supports_model_discovery(config: &StoredConfig) -> Result<bool> {
+    let router = ProviderRouter::from_config(config)?;
+    Ok(router.supports_model_discovery())
 }
 
 async fn generate_session_title(
-    client: &reqwest::Client,
-    host: &str,
+    config: &StoredConfig,
     model: &str,
     first_user_message: &str,
 ) -> Result<String> {
+    let router = ProviderRouter::from_config(config)?;
     let prompt = format!(
         "Create a concise session title from this user message.\nRules:\n- 3 to 6 words\n- Title Case\n- No quotes\n- No ending punctuation\n- Keep it specific\nReturn only the title.\n\nUser message:\n{}",
         first_user_message.trim()
     );
-    let request = OllamaGenerateRequest {
-        model: model.to_string(),
-        prompt,
-        stream: false,
+    let response = router
+        .chat(ProviderChatRequest {
+            model: model.to_string(),
+            messages: vec![ProviderMessage {
+                role: ProviderRole::User,
+                content: prompt,
+            }],
+            temperature: None,
+        })
+        .await?;
+    Ok(response.message.content)
+}
+
+fn provider_message_from_chat(message: ChatMessage) -> ProviderMessage {
+    ProviderMessage {
+        role: match message.role.as_str() {
+            "system" => ProviderRole::System,
+            "assistant" => ProviderRole::Assistant,
+            "tool" => ProviderRole::Tool,
+            _ => ProviderRole::User,
+        },
+        content: message.content,
+    }
+}
+
+fn provider_cache_key(config: &StoredConfig) -> Result<String> {
+    let (provider_name, provider) = config.active_provider_entry()?;
+    let key = match provider {
+        ProviderConfig::Ollama { endpoint, .. } => format!("{provider_name}:{endpoint}"),
+        ProviderConfig::OpenAi { endpoint, .. } => format!(
+            "{provider_name}:{}",
+            endpoint.as_deref().unwrap_or("https://api.openai.com/v1")
+        ),
+        ProviderConfig::Anthropic { endpoint, .. } => format!(
+            "{provider_name}:{}",
+            endpoint
+                .as_deref()
+                .unwrap_or("https://api.anthropic.com/v1/messages")
+        ),
+        ProviderConfig::OpenAiCompatible { endpoint, .. } => format!("{provider_name}:{endpoint}"),
     };
-    let url = format!("{}/api/generate", host.trim_end_matches('/'));
-    let resp = client
-        .post(url)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| anyhow!("HTTP send error for title generation: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "Title generation returned {}: {}",
-            resp.status(),
-            resp.text()
-                .await
-                .unwrap_or_else(|_| "<no body>".to_string())
-        ));
-    }
-    let parsed: OllamaGenerateResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("Failed to parse title generation JSON: {e}"))?;
-    if let Some(error) = parsed.error
-        && !error.trim().is_empty()
-    {
-        return Err(anyhow!("Title generation error: {error}"));
-    }
-    Ok(parsed.response.unwrap_or_default())
+    Ok(key)
+}
+
+fn enter_manual_model_entry(app: &mut AppState) {
+    app.model_loading = false;
+    app.model_manual_entry = true;
+    app.model_options.clear();
+    app.model_selected_index = 0;
+    app.model_input = app.model.clone();
+    app.status_message = format!(
+        "Model discovery isn't available for {}. Type a model name to continue.",
+        app.provider_name
+    );
 }
 
 fn normalize_generated_title(raw: &str) -> String {
@@ -3802,29 +4097,6 @@ fn normalize_generated_title(raw: &str) -> String {
         out.pop();
     }
     out
-}
-
-fn parse_and_emit_line(line: &str, tx: &mpsc::UnboundedSender<StreamEvent>) -> Result<()> {
-    let parsed: OllamaChatChunk =
-        serde_json::from_str(line).map_err(|e| anyhow!("Failed to parse stream JSON: {e}"))?;
-
-    if let Some(error) = parsed.error {
-        let _ = tx.send(StreamEvent::Error(error));
-        return Ok(());
-    }
-
-    if let Some(message) = parsed.message
-        && let Some(content) = message.content
-        && !content.is_empty()
-    {
-        let _ = tx.send(StreamEvent::Token(content));
-    }
-
-    if parsed.done.unwrap_or(false) {
-        let _ = tx.send(StreamEvent::Done);
-    }
-
-    Ok(())
 }
 
 fn cleanup_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {

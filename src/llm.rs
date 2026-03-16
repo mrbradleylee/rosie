@@ -1,35 +1,16 @@
 use crate::config::load_config;
+use crate::provider::{ChatRequest, Message, ProviderRouter, Role};
 use anyhow::{Result, anyhow};
 use log::info;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::future::Future;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const DEFAULT_OLLAMA_HOST: &str = "http://localhost:11434";
-
-#[derive(Serialize, Deserialize)]
-struct Message {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize)]
-struct ChatCompletionRequest {
-    model: String,
-    messages: Vec<Message>,
-}
-
 pub struct GeneratedCommand {
     pub command: String,
     pub summary: String,
-}
-
-struct RequestContext {
-    client: reqwest::Client,
-    url: String,
-    model: String,
 }
 
 enum RuntimeMode {
@@ -51,49 +32,12 @@ pub async fn generate_command_with_spinner(
     with_spinner(llm_generate_command(prompt, runtime_model)).await
 }
 
-pub async fn discover_ollama_models(host: &str) -> Result<Vec<String>> {
-    use reqwest::Client;
-
-    let url = format!("{}/api/tags", host.trim_end_matches('/'));
-    let client = Client::new();
-
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| anyhow!("HTTP send error for model discovery: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "Model discovery returned {}: {}",
-            resp.status(),
-            resp.text().await?
-        ));
-    }
-
-    #[derive(serde::Deserialize)]
-    struct OllamaModel {
-        name: String,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct OllamaTagsResponse {
-        models: Vec<OllamaModel>,
-    }
-
-    let response: OllamaTagsResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("Failed to parse model discovery JSON: {}", e))?;
-
-    Ok(response.models.into_iter().map(|m| m.name).collect())
-}
-
 async fn llm_generate_command(
     prompt: &str,
     runtime_model: Option<&str>,
 ) -> Result<GeneratedCommand> {
-    let ctx = resolve_request_context(RuntimeMode::Cmd, runtime_model).await?;
+    let router = load_router()?;
+    let model = resolve_model(&router, RuntimeMode::Cmd, runtime_model).await?;
     let command_prompt = format!(
         "You are an assistant that returns JSON with exactly two string fields: \
          \"command\" for the exact shell command, and \"summary\" for a brief \
@@ -101,7 +45,7 @@ async fn llm_generate_command(
          markdown fences or extra text.\n\nTask: {}",
         prompt
     );
-    let content = send_chat_completion(&ctx.client, &ctx.url, &ctx.model, command_prompt).await?;
+    let content = send_chat_completion(&router, &model, command_prompt).await?;
     let mut generated = extract_generated_command(&content)?;
 
     if generated.command.is_empty() {
@@ -116,185 +60,45 @@ async fn llm_generate_command(
 }
 
 async fn llm_generate_chat(prompt: &str, runtime_model: Option<&str>) -> Result<String> {
-    let ctx = resolve_request_context(RuntimeMode::Ask, runtime_model).await?;
+    let router = load_router()?;
+    let model = resolve_model(&router, RuntimeMode::Ask, runtime_model).await?;
     let chat_prompt = format!(
         "You are a helpful assistant that answers questions naturally.\n\nAnswer the user's question clearly and concisely. Return your answer directly, without markdown fences or extra text.\n\nTask: {}",
         prompt
     );
-    send_chat_completion(&ctx.client, &ctx.url, &ctx.model, chat_prompt).await
+    send_chat_completion(&router, &model, chat_prompt).await
 }
 
 async fn send_chat_completion(
-    client: &reqwest::Client,
-    url: &str,
+    router: &ProviderRouter,
     model: &str,
     content: String,
 ) -> Result<String> {
-    let request_body = ChatCompletionRequest {
-        model: model.to_string(),
-        messages: vec![Message {
-            role: "user".into(),
-            content,
-        }],
-    };
-
-    let resp = client
-        .post(url)
-        .json(&request_body)
-        .send()
-        .await
-        .map_err(|e| anyhow!("HTTP send error: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "API returned {}: {}",
-            resp.status(),
-            resp.text().await?
-        ));
-    }
-
-    #[derive(Deserialize)]
-    struct CompletionChoice {
-        message: Message,
-    }
-
-    #[derive(Deserialize)]
-    struct CompletionResponse {
-        choices: Vec<CompletionChoice>,
-    }
-
-    let completion: CompletionResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("JSON parse error: {}", e))?;
-
-    completion
-        .choices
-        .first()
-        .map(|choice| choice.message.content.trim().to_string())
-        .ok_or_else(|| anyhow!("No choices returned"))
-}
-
-async fn with_spinner<T, Fut>(future: Fut) -> Result<T>
-where
-    Fut: Future<Output = Result<T>>,
-{
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_clone = Arc::clone(&stop);
-    let spinner = tokio::task::spawn_blocking(move || {
-        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-        let mut i = 0usize;
-        let stderr = std::io::stderr();
-        while !stop_clone.load(Ordering::Relaxed) {
-            {
-                let mut err = stderr.lock();
-                let _ = write!(err, "\r{} Thinking...", frames[i % frames.len()]);
-                let _ = err.flush();
-            }
-            std::thread::sleep(std::time::Duration::from_millis(80));
-            i += 1;
-        }
-        let mut err = stderr.lock();
-        let _ = write!(err, "\r\x1b[2K");
-        let _ = err.flush();
-    });
-
-    let result = future.await;
-    stop.store(true, Ordering::Relaxed);
-    let _ = spinner.await;
-    result
-}
-
-async fn resolve_request_context(
-    mode: RuntimeMode,
-    runtime_model: Option<&str>,
-) -> Result<RequestContext> {
-    let config = load_config()?;
-    let endpoint = config
-        .ollama_host
-        .clone()
-        .unwrap_or_else(|| DEFAULT_OLLAMA_HOST.to_string());
-
-    reqwest::Url::parse(&endpoint).map_err(|_| {
-        anyhow!(
-            "Invalid ollama_host '{}'. Set a full URL such as http://localhost:11434",
-            endpoint
-        )
-    })?;
-
-    let model = runtime_model
-        .map(str::to_owned)
-        .or_else(|| match mode {
-            RuntimeMode::Ask => config.ask_model.clone(),
-            RuntimeMode::Cmd => config.cmd_model.clone(),
+    let response = router
+        .chat(ChatRequest {
+            model: model.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content,
+            }],
+            temperature: None,
         })
-        .or_else(|| config.effective_default_model());
+        .await?;
 
-    let model = match model {
-        Some(model) => model,
-        None => discover_ollama_models(&endpoint)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                anyhow!("No Ollama models found. Run `ollama pull <model>` and retry.")
-            })?,
-    };
-
-    Ok(RequestContext {
-        client: reqwest::Client::new(),
-        url: format!("{}/v1/chat/completions", endpoint.trim_end_matches('/')),
-        model,
-    })
+    Ok(response.message.content.trim().to_string())
 }
 
-fn extract_generated_command(content: &str) -> Result<GeneratedCommand> {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return Err(anyhow!("No content returned"));
-    }
-
-    if let Some(response) = parse_generated_response(trimmed)? {
-        return Ok(GeneratedCommand {
-            command: response.command.trim().to_string(),
-            summary: response.summary.trim().to_string(),
-        });
-    }
-
-    if looks_like_structured_response(trimmed) {
-        return Err(anyhow!(
-            "Unable to parse structured command response from model output"
-        ));
-    }
-
-    Ok(GeneratedCommand {
-        command: extract_command(trimmed)?,
-        summary: "Generated shell command.".to_string(),
-    })
+fn load_router() -> Result<ProviderRouter> {
+    let config = load_config()?;
+    ProviderRouter::from_config(&config)
 }
 
-fn parse_generated_response(content: &str) -> Result<Option<ParsedGeneratedResponse>> {
-    if let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(content) {
-        return Ok(Some(response));
-    }
-
-    if let Some(unfenced) = strip_code_fence(content)
-        && let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(unfenced)
-    {
-        return Ok(Some(response));
-    }
-
-    if let Some(json_slice) = extract_json_object(content)
-        && let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(json_slice)
-    {
-        return Ok(Some(response));
-    }
-
-    if let Some(response) = extract_response_fields(content) {
-        return Ok(Some(response));
-    }
-
-    Ok(None)
+async fn resolve_model(
+    router: &ProviderRouter,
+    _mode: RuntimeMode,
+    runtime_model: Option<&str>,
+) -> Result<String> {
+    router.resolve_model(runtime_model).await
 }
 
 #[derive(Deserialize)]
@@ -355,6 +159,85 @@ fn extract_quoted_json_field(content: &str, field: &str) -> Option<String> {
     }
 
     None
+}
+
+async fn with_spinner<T, Fut>(future: Fut) -> Result<T>
+where
+    Fut: Future<Output = Result<T>>,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+    let spinner = tokio::task::spawn_blocking(move || {
+        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let mut i = 0usize;
+        let stderr = std::io::stderr();
+        while !stop_clone.load(Ordering::Relaxed) {
+            {
+                let mut err = stderr.lock();
+                let _ = write!(err, "\r{} Thinking...", frames[i % frames.len()]);
+                let _ = err.flush();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            i += 1;
+        }
+        let mut err = stderr.lock();
+        let _ = write!(err, "\r\x1b[2K");
+        let _ = err.flush();
+    });
+
+    let result = future.await;
+    stop.store(true, Ordering::Relaxed);
+    let _ = spinner.await;
+    result
+}
+
+fn extract_generated_command(content: &str) -> Result<GeneratedCommand> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("No content returned"));
+    }
+
+    if let Some(response) = parse_generated_response(trimmed)? {
+        return Ok(GeneratedCommand {
+            command: response.command.trim().to_string(),
+            summary: response.summary.trim().to_string(),
+        });
+    }
+
+    if looks_like_structured_response(trimmed) {
+        return Err(anyhow!(
+            "Unable to parse structured command response from model output"
+        ));
+    }
+
+    Ok(GeneratedCommand {
+        command: extract_command(trimmed)?,
+        summary: "Generated shell command.".to_string(),
+    })
+}
+
+fn parse_generated_response(content: &str) -> Result<Option<ParsedGeneratedResponse>> {
+    if let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(content) {
+        return Ok(Some(response));
+    }
+
+    if let Some(unfenced) = strip_code_fence(content)
+        && let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(unfenced)
+    {
+        return Ok(Some(response));
+    }
+
+    if let Some(json_slice) = extract_json_object(content)
+        && let Ok(response) = serde_json::from_str::<ParsedGeneratedResponse>(json_slice)
+    {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) = extract_response_fields(content) {
+        return Ok(Some(response));
+    }
+
+    Ok(None)
 }
 
 fn looks_like_structured_response(content: &str) -> bool {

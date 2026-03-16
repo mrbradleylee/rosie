@@ -1,6 +1,6 @@
 .TH ROSIE 1
 .SH NAME
-rosie \- quick chat and command generation with Ollama-backed model selection
+rosie \- quick chat and command generation with provider-backed model selection
 .SH SYNOPSIS
 .B rosie
 [\fIOPTIONS\fR] [\fIPROMPT\fR]...
@@ -44,7 +44,7 @@ to enter
 .B Insert
 mode; pressing
 .B Enter
-sends the composer content to Ollama, and assistant tokens stream into transcript as they arrive.
+sends the composer content to the active provider, and assistant tokens stream into transcript as they arrive.
 .B j
 /
 .B k
@@ -113,7 +113,7 @@ In the model picker, use
 .B j
 /
 .B k
-(or arrow keys) to move, press
+(or arrow keys) to move when the provider supports model discovery. When discovery is unavailable, type the model name directly instead. Press
 .B Enter
 to apply to the active session, and
 .B Esc
@@ -139,10 +139,10 @@ to quit from any mode.
 Prompts can be supplied as trailing arguments or from standard input. If neither is provided in an interactive terminal, Rosie prompts for one line of input.
 .SH OPTIONS
 .TP
-.B --configure
+.B --config
 Interactively create or update local configuration in
 .I ~/.config/rosie/config.toml
-(including Ollama host and model defaults).
+(including active provider selection and provider settings).
 .TP
 .B --install
 Install the current binary into the local bin directory, install this man page into the local man directory, and sync bundled themes into
@@ -167,8 +167,17 @@ Display version information and exit.
 .TP
 .BR -h , " --help"
 Print help information.
+.TP
+.B rosie auth add
+Store a provider API key in the OS keychain.
+.TP
+.B rosie auth list
+Show whether provider credentials are available from environment variables or keychain storage.
+.TP
+.B rosie auth remove
+Delete a provider API key from the OS keychain.
 .SH CONFIGURATION
-Rosie uses file-based configuration for host/model defaults:
+Rosie uses file-based configuration:
 .TP
 .I ~/.config/rosie/config.toml
 (or
@@ -179,22 +188,22 @@ is set).
 .PP
 Supported keys:
 .TP
-.B ollama_host
-Ollama base URL (default:
-.I http://localhost:11434 )
+.B active_provider
+Name of the provider entry Rosie should use.
 .TP
-.B default_model
-Global model fallback
+.B [providers.<name>]
+Named provider definitions, including provider
+.B type
+and provider-specific fields such as
+.B endpoint
+and
+.B model
 .TP
-.B ask_model
-Mode-specific default for
-.B --ask
-(optional)
-.TP
-.B cmd_model
-Mode-specific default for
-.B --cmd
-(optional)
+.B allow_insecure_http
+Optional for
+.B openai-compatible
+providers to permit non-HTTPS endpoints outside localhost and
+.B 192.168.x.x
 .TP
 .B theme
 TUI theme name (built-in or file-based) loaded from
@@ -216,20 +225,29 @@ Model resolution order:
 .IP "1." 4
 .B --model
 .IP "2." 4
-mode-specific default (
-.B ask_model
-or
-.B cmd_model )
+active provider
+.B model
 .IP "3." 4
-.B default_model
-.IP "4." 4
-first local Ollama model discovered via
-.I /api/tags
+first provider-discovered model when supported
+.PP
+API keys resolve from provider-specific environment variables first and then the OS keychain. OpenAI uses
+.BR OPENAI_API_KEY ,
+Anthropic uses
+.BR ANTHROPIC_API_KEY ,
+and named compatible providers use
+.BR ROSIE_<PROVIDER_NAME>_API_KEY .
+.PP
+OpenAI and Anthropic endpoints must use HTTPS. OpenAI-compatible endpoints may use plain HTTP on localhost, loopback IPs, and
+.B 192.168.x.x
+by default; other non-HTTPS hosts require
+.BR allow_insecure_http " = true" .
+.PP
+Rosie routes `--ask`, `--cmd`, and TUI chat through the configured provider runtime. TUI model discovery depends on whether the active provider supports listing models; otherwise the model picker falls back to manual model entry.
 .SH FILES
 .TP
 .I ~/.config/rosie/config.toml
 Persistent local configuration written by
-.BR rosie " --configure" .
+.BR rosie " --config" .
 .TP
 .I ${XDG_DATA_HOME}/rosie/sessions.sqlite3
 Session/message persistence database used by TUI mode.
@@ -251,7 +269,7 @@ is unset.
 .SH EXAMPLES
 .TP
 Configure Rosie:
-.B rosie --configure
+.B rosie --config
 .TP
 Install Rosie:
 .B rosie --install

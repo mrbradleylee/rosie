@@ -12,11 +12,14 @@ Running `rosie` with no mode flag launches the full-screen TUI chat interface (l
 - `--cmd` command-generation mode with existing `e/r/q` interactive flow
 - Default no-flag TUI chat mode with persisted local sessions
 - Built-in TUI themes with runtime switching (`:theme`)
-- `--model <MODEL>` runtime model override for both `--ask` and `--cmd`
-- Config-driven Ollama host/model defaults in `~/.config/rosie/config.toml`
-- Interactive `--configure` flow with model discovery from Ollama
-- Local install helper via `rosie -install`
+- `--model <MODEL>` runtime model override for `--ask`, `--cmd`, and TUI launch
+- Provider-driven model defaults in `~/.config/rosie/config.toml`
+- Interactive `--config` flow with provider-aware setup
+- `rosie auth add|list|remove` for API-key management
+- Local install helper via `rosie --install`
 - Cross-platform Rust binary (Linux/macOS/Windows with Rust toolchain)
+
+Rosie now routes `--ask`, `--cmd`, and TUI chat through Ollama, OpenAI, Anthropic, and OpenAI-compatible providers.
 
 ## Installation
 
@@ -34,11 +37,11 @@ Manual build/install:
 git clone https://github.com/mrbradleylee/rosie
 cd rosie
 cargo build --release
-./target/release/rosie -install
+./target/release/rosie --install
 ```
 
 By default Rosie installs itself into `~/.local/bin/rosie` (or `$XDG_BIN_HOME/rosie` if set), and installs the man page to `~/.local/share/man/man1/rosie.1` (or `$XDG_DATA_HOME/man/man1/rosie.1`).
-`rosie -install` also syncs bundled theme files into `${XDG_CONFIG_HOME:-~/.config}/rosie/themes`.
+`rosie --install` also syncs bundled theme files into `${XDG_CONFIG_HOME:-~/.config}/rosie/themes`.
 
 ## Usage
 
@@ -46,11 +49,16 @@ By default Rosie installs itself into `~/.local/bin/rosie` (or `$XDG_BIN_HOME/ro
 # Default entrypoint (TUI chat mode)
 rosie
 
-# Configure Ollama host and model defaults
-rosie -configure
+# Configure Rosie provider settings
+rosie --config
+
+# Store an API key in the OS keychain
+rosie auth add openai
+rosie auth add anthropic
+rosie auth add local
 
 # Install current binary
-rosie -install
+rosie --install
 
 # Quick one-shot chat
 rosie --ask "What's the capital of France?"
@@ -80,7 +88,7 @@ In the default TUI:
 - from landing, type and press `Enter` to begin chatting, use `Ctrl+P`/`:` for command palette, and `F1` for help
 - once in chat, `Normal` mode is active by default
 - press `i` to enter `Insert` mode
-- in `Insert`, type in the composer, use `Backspace` to edit, and press `Enter` to send to Ollama
+- in `Insert`, type in the composer, use `Backspace` to edit, and press `Enter` to send to the active provider
 - press `Esc` to return to `Normal`
 - assistant tokens stream into transcript as they arrive
 - use `j`/`k` (or arrow keys) in `Normal` to scroll transcript
@@ -94,14 +102,14 @@ In the default TUI:
 - press `:` or `Ctrl+P` to open the floating command panel, then run:
   - `:help`
   - `:session` (open session manager modal)
-  - `:models` (open model picker from Ollama `/api/tags` for the active session)
+  - `:models` (open model picker for the active provider, or manual model entry when discovery is unsupported)
   - `:theme` (open picker from config dir themes)
   - `:theme <name>` (set TUI theme directly)
   - `:quit`
 - in the `:` command panel, use `j`/`k` (or arrows) to select from the command picklist and `Enter` to run
 - in session manager, use `j`/`k` to select and `Enter` switch, `n` new, `r` rename, `d` delete (with confirmation), `Esc` close
 - delete actions require confirmation (`[Y/n]`; `Enter` defaults to `Y`)
-- in the model picker, use `j`/`k` (or arrows) to move, `Enter` to apply, and `Esc` to cancel
+- in the model picker, use `j`/`k` (or arrows) to move when discovery is available; otherwise type a model name directly, then press `Enter` to apply or `Esc` to cancel
 - selected models are persisted per session and restored when you switch sessions/restart
 - press `Esc` in `Normal` to cancel an in-flight request
 - `Ctrl+C` quits from any mode
@@ -114,7 +122,7 @@ TUI sessions/messages are persisted in local SQLite at:
 
 ## Configuration
 
-Rosie configuration is file-based (no environment override path for host/model selection).
+Rosie configuration is file-based.
 
 Config file path:
 - `~/.config/rosie/config.toml`
@@ -123,15 +131,23 @@ Config file path:
 Preferred setup flow:
 
 ```bash
-rosie -configure
+rosie --config
 ```
 
 That command creates/updates config and prompts for:
-- `ollama_host`
-- `default_model`
-- `ask_model` (optional)
-- `cmd_model` (optional)
+- `active_provider`
+- one provider block under `[providers.<name>]`
 - `execution_enabled` (controls whether execute is allowed in `--cmd`)
+
+Credential resolution order:
+1. environment variable
+2. OS keychain via `rosie auth add <provider>`
+3. error
+
+Credential environment variables:
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `ROSIE_<PROVIDER_NAME>_API_KEY` for named `openai-compatible` providers
 
 Theme is controlled in TUI with `:theme` and persisted into config as `theme`.
 `theme` accepts a packaged theme name from the repo `themes/` directory or a user file theme name loaded from `~/.config/rosie/themes/<name>.toml` (or `${XDG_CONFIG_HOME}/rosie/themes/<name>.toml`).
@@ -140,12 +156,26 @@ Packaged defaults include Rose Pine variants (`rose-pine`, `rose-pine-moon`, `ro
 Example config:
 
 ```toml
-ollama_host = "http://localhost:11434"
-default_model = "llama3.2"
-ask_model = "llama3.2"
-cmd_model = "qwen2.5-coder"
+active_provider = "ollama"
 theme = "<built-in-or-file-theme-name>"
 execution_enabled = true
+
+[providers.ollama]
+type = "ollama"
+endpoint = "http://localhost:11434"
+model = "llama3.2"
+```
+
+Example OpenAI-compatible config:
+
+```toml
+active_provider = "local"
+
+[providers.local]
+type = "openai-compatible"
+endpoint = "http://192.168.1.20:8080/v1"
+model = "omnicoder-9b"
+allow_insecure_http = false
 ```
 
 Theme file schema (preferred):
@@ -193,11 +223,15 @@ Legacy `[colors]` files are still supported for backward compatibility.
 
 Model resolution order:
 1. `--model`
-2. mode-specific model (`ask_model` / `cmd_model`)
-3. `default_model`
-4. first available local Ollama model from `/api/tags`
+2. active provider `model`
+3. first available provider-discovered model when supported
 
 If no model can be resolved, Rosie exits with an actionable error.
+
+Remote transport rules:
+- OpenAI and Anthropic endpoints must use HTTPS
+- OpenAI-compatible endpoints may use plain HTTP on `localhost`, loopback IPs, and `192.168.x.x`
+- other non-HTTPS OpenAI-compatible endpoints require `allow_insecure_http = true`
 
 ## Releasing
 
