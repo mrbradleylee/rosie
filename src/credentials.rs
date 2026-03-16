@@ -24,16 +24,9 @@ impl fmt::Display for CredentialTarget {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CredentialSource {
-    Env(String),
-    Keychain,
-}
-
 #[derive(Clone, Debug)]
 pub struct ResolvedCredential {
     pub secret: String,
-    pub source: CredentialSource,
 }
 
 #[derive(Clone, Debug)]
@@ -103,7 +96,6 @@ impl CredentialManager {
         if let Some(secret) = cli_override.filter(|value| !value.trim().is_empty()) {
             return Ok(Some(ResolvedCredential {
                 secret: secret.to_string(),
-                source: CredentialSource::Env("cli-override".to_string()),
             }));
         }
 
@@ -111,19 +103,13 @@ impl CredentialManager {
             if let Some(secret) = env::var_os(&env_var) {
                 let secret = secret.to_string_lossy().trim().to_string();
                 if !secret.is_empty() {
-                    return Ok(Some(ResolvedCredential {
-                        secret,
-                        source: CredentialSource::Env(env_var),
-                    }));
+                    return Ok(Some(ResolvedCredential { secret }));
                 }
             }
         }
 
         if let Some(secret) = self.store.get_secret(target)? {
-            return Ok(Some(ResolvedCredential {
-                secret,
-                source: CredentialSource::Keychain,
-            }));
+            return Ok(Some(ResolvedCredential { secret }));
         }
 
         Ok(None)
@@ -242,8 +228,7 @@ fn normalize_env_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialManager, CredentialSource, CredentialTarget, SecretStore,
-        credential_target_from_name, env_var_name,
+        CredentialManager, CredentialTarget, SecretStore, credential_target_from_name, env_var_name,
     };
     use crate::config::{ProviderConfig, StoredConfig};
     use anyhow::Result;
@@ -309,7 +294,6 @@ mod tests {
             .expect("resolve")
             .expect("credential");
         assert_eq!(resolved.secret, "test-secret");
-        assert_eq!(resolved.source, CredentialSource::Keychain);
     }
 
     #[test]

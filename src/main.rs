@@ -251,7 +251,14 @@ fn action_prompt(execution_enabled: bool) -> String {
 
 async fn configure() -> Result<()> {
     let path = config_path()?;
-    let existing = load_config()?;
+    let existing = match load_config() {
+        Ok(config) => config,
+        Err(err) => {
+            println!("Existing config could not be loaded: {err}");
+            println!("Starting from default configuration values instead.");
+            StoredConfig::default()
+        }
+    };
 
     println!("Rosie configuration");
     println!("Press enter to keep the current value.");
