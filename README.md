@@ -12,11 +12,11 @@ Running `rosie` with no mode flag launches the full-screen TUI chat interface (l
 - `--cmd` command-generation mode with existing `e/r/q` interactive flow
 - Default no-flag TUI chat mode with persisted local sessions
 - Built-in TUI themes with runtime switching (`:theme`)
-- `--model <MODEL>` runtime model override for both `--ask` and `--cmd`
+- `--model <MODEL>` runtime model override for `--ask`, `--cmd`, and TUI launch
 - Provider-driven model defaults in `~/.config/rosie/config.toml`
 - Interactive `--config` flow with provider-aware setup
 - `rosie auth add|list|remove` for API-key management
-- Local install helper via `rosie -install`
+- Local install helper via `rosie --install`
 - Cross-platform Rust binary (Linux/macOS/Windows with Rust toolchain)
 
 Rosie now routes `--ask`, `--cmd`, and TUI chat through Ollama, OpenAI, Anthropic, and OpenAI-compatible providers.
@@ -37,11 +37,11 @@ Manual build/install:
 git clone https://github.com/mrbradleylee/rosie
 cd rosie
 cargo build --release
-./target/release/rosie -install
+./target/release/rosie --install
 ```
 
 By default Rosie installs itself into `~/.local/bin/rosie` (or `$XDG_BIN_HOME/rosie` if set), and installs the man page to `~/.local/share/man/man1/rosie.1` (or `$XDG_DATA_HOME/man/man1/rosie.1`).
-`rosie -install` also syncs bundled theme files into `${XDG_CONFIG_HOME:-~/.config}/rosie/themes`.
+`rosie --install` also syncs bundled theme files into `${XDG_CONFIG_HOME:-~/.config}/rosie/themes`.
 
 ## Usage
 
@@ -58,7 +58,7 @@ rosie auth add anthropic
 rosie auth add local
 
 # Install current binary
-rosie -install
+rosie --install
 
 # Quick one-shot chat
 rosie --ask "What's the capital of France?"
@@ -102,14 +102,14 @@ In the default TUI:
 - press `:` or `Ctrl+P` to open the floating command panel, then run:
   - `:help`
   - `:session` (open session manager modal)
-  - `:models` (open model picker for the active provider when model discovery is supported)
+  - `:models` (open model picker for the active provider, or manual model entry when discovery is unsupported)
   - `:theme` (open picker from config dir themes)
   - `:theme <name>` (set TUI theme directly)
   - `:quit`
 - in the `:` command panel, use `j`/`k` (or arrows) to select from the command picklist and `Enter` to run
 - in session manager, use `j`/`k` to select and `Enter` switch, `n` new, `r` rename, `d` delete (with confirmation), `Esc` close
 - delete actions require confirmation (`[Y/n]`; `Enter` defaults to `Y`)
-- in the model picker, use `j`/`k` (or arrows) to move, `Enter` to apply, and `Esc` to cancel
+- in the model picker, use `j`/`k` (or arrows) to move when discovery is available; otherwise type a model name directly, then press `Enter` to apply or `Esc` to cancel
 - selected models are persisted per session and restored when you switch sessions/restart
 - press `Esc` in `Normal` to cancel an in-flight request
 - `Ctrl+C` quits from any mode

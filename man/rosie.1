@@ -1,6 +1,6 @@
 .TH ROSIE 1
 .SH NAME
-rosie \- quick chat and command generation with Ollama-backed model selection
+rosie \- quick chat and command generation with provider-backed model selection
 .SH SYNOPSIS
 .B rosie
 [\fIOPTIONS\fR] [\fIPROMPT\fR]...
@@ -44,7 +44,7 @@ to enter
 .B Insert
 mode; pressing
 .B Enter
-sends the composer content to Ollama, and assistant tokens stream into transcript as they arrive.
+sends the composer content to the active provider, and assistant tokens stream into transcript as they arrive.
 .B j
 /
 .B k
@@ -113,7 +113,7 @@ In the model picker, use
 .B j
 /
 .B k
-(or arrow keys) to move, press
+(or arrow keys) to move when the provider supports model discovery. When discovery is unavailable, type the model name directly instead. Press
 .B Enter
 to apply to the active session, and
 .B Esc
@@ -242,7 +242,7 @@ OpenAI and Anthropic endpoints must use HTTPS. OpenAI-compatible endpoints may u
 by default; other non-HTTPS hosts require
 .BR allow_insecure_http " = true" .
 .PP
-Rosie routes `--ask`, `--cmd`, and TUI chat through the configured provider runtime. TUI model discovery depends on whether the active provider supports listing models.
+Rosie routes `--ask`, `--cmd`, and TUI chat through the configured provider runtime. TUI model discovery depends on whether the active provider supports listing models; otherwise the model picker falls back to manual model entry.
 .SH FILES
 .TP
 .I ~/.config/rosie/config.toml
