@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.0
+
 ### Changed
 
 - Replaced the legacy flat provider config with `active_provider` plus `[providers.<name>]` blocks, and reject legacy-only config files at runtime
