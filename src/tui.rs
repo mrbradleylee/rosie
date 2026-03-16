@@ -27,11 +27,10 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme as SyntectTheme, ThemeSet};
-use syntect::parsing::SyntaxSet;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tree_sitter::Language;
+use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 
 pub fn run(
     config: StoredConfig,
@@ -3076,7 +3075,7 @@ fn render_message_block(
 
     let content = message_content_for_render(message, is_busy, idx, total_messages);
     let mut in_code_block = false;
-    let mut code_highlighter: Option<HighlightLines<'static>> = None;
+    let mut code_language: Option<String> = None;
     let mut code_lines: Vec<String> = Vec::new();
     let mut wrote_any = false;
     let mut wrote_first_content_line = false;
@@ -3095,8 +3094,9 @@ fn render_message_block(
                     Span::styled("  ╭─ ".to_string(), ctx.rail_style),
                     Span::styled(code_label, ctx.rail_style.add_modifier(Modifier::BOLD)),
                 ]));
-                code_highlighter =
-                    build_code_highlighter(if lang.is_empty() { None } else { Some(lang) }, theme);
+                code_language =
+                    normalize_code_language(if lang.is_empty() { None } else { Some(lang) })
+                        .map(str::to_string);
                 code_lines.clear();
                 in_code_block = true;
                 wrote_any = true;
@@ -3104,12 +3104,12 @@ fn render_message_block(
                 flush_code_block(
                     &mut rows,
                     &code_lines,
-                    &mut code_highlighter,
+                    code_language.as_deref(),
                     &mut wrote_first_content_line,
                     &ctx,
                 );
                 code_lines.clear();
-                code_highlighter = None;
+                code_language = None;
                 in_code_block = false;
                 wrote_any = true;
             }
@@ -3137,7 +3137,7 @@ fn render_message_block(
         flush_code_block(
             &mut rows,
             &code_lines,
-            &mut code_highlighter,
+            code_language.as_deref(),
             &mut wrote_first_content_line,
             &ctx,
         );
@@ -3207,7 +3207,7 @@ fn message_content_for_render(
 fn flush_code_block(
     rows: &mut Vec<Line<'static>>,
     code_lines: &[String],
-    code_highlighter: &mut Option<HighlightLines<'static>>,
+    code_language: Option<&str>,
     wrote_first_content_line: &mut bool,
     ctx: &MessageRenderCtx<'_>,
 ) {
@@ -3216,7 +3216,10 @@ fn flush_code_block(
         .map(|l| l.chars().count())
         .max()
         .unwrap_or(0);
-    for (line_idx, code_line) in code_lines.iter().enumerate() {
+    let highlighted_lines =
+        highlighted_code_lines(code_lines, code_language, ctx.code_style, ctx.theme);
+    for (line_idx, highlighted_segments) in highlighted_lines.into_iter().enumerate() {
+        let code_line = code_lines.get(line_idx).map(String::as_str).unwrap_or("");
         let mut spans: Vec<Span<'static>> = Vec::new();
         if !ctx.is_assistant && !*wrote_first_content_line && line_idx == 0 {
             spans.push(Span::styled(
@@ -3229,11 +3232,11 @@ fn flush_code_block(
             spans.push(Span::styled(ctx.wrap_pad.to_string(), ctx.text_style));
         }
         spans.push(Span::styled("  │ ".to_string(), ctx.gutter_style));
-        spans.extend(highlighted_code_spans(
-            code_line,
-            code_highlighter,
-            ctx.code_style,
-        ));
+        if highlighted_segments.is_empty() {
+            spans.push(Span::styled(code_line.to_string(), ctx.code_style));
+        } else {
+            spans.extend(highlighted_segments);
+        }
         let pad = block_width.saturating_sub(code_line.chars().count());
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad), ctx.code_style));
@@ -3271,38 +3274,268 @@ fn push_non_assistant_text_line(
         ));
     }
 }
-fn syntax_assets() -> &'static (SyntaxSet, ThemeSet) {
-    static ASSETS: OnceLock<(SyntaxSet, ThemeSet)> = OnceLock::new();
-    ASSETS.get_or_init(|| {
-        (
-            SyntaxSet::load_defaults_newlines(),
-            ThemeSet::load_defaults(),
-        )
+const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
+    "attribute",
+    "comment",
+    "constant",
+    "constant.builtin",
+    "constructor",
+    "embedded",
+    "function",
+    "function.builtin",
+    "keyword",
+    "module",
+    "number",
+    "operator",
+    "property",
+    "punctuation",
+    "punctuation.bracket",
+    "punctuation.delimiter",
+    "string",
+    "string.special",
+    "tag",
+    "type",
+    "type.builtin",
+    "variable",
+    "variable.builtin",
+    "variable.parameter",
+];
+
+struct TreeSitterAssets {
+    rust: HighlightConfiguration,
+    python: HighlightConfiguration,
+    javascript: HighlightConfiguration,
+    typescript: HighlightConfiguration,
+    tsx: HighlightConfiguration,
+    json: HighlightConfiguration,
+    bash: HighlightConfiguration,
+    yaml: HighlightConfiguration,
+}
+
+fn syntax_assets() -> &'static TreeSitterAssets {
+    static ASSETS: OnceLock<TreeSitterAssets> = OnceLock::new();
+    ASSETS.get_or_init(|| TreeSitterAssets {
+        rust: build_highlight_config(
+            tree_sitter_rust::LANGUAGE.into(),
+            "rust",
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            tree_sitter_rust::INJECTIONS_QUERY,
+            "",
+        ),
+        python: build_highlight_config(
+            tree_sitter_python::LANGUAGE.into(),
+            "python",
+            tree_sitter_python::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        ),
+        javascript: build_highlight_config(
+            tree_sitter_javascript::LANGUAGE.into(),
+            "javascript",
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::INJECTIONS_QUERY,
+            tree_sitter_javascript::LOCALS_QUERY,
+        ),
+        typescript: build_highlight_config(
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            "typescript",
+            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            "",
+            tree_sitter_typescript::LOCALS_QUERY,
+        ),
+        tsx: build_highlight_config(
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+            "tsx",
+            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            "",
+            tree_sitter_typescript::LOCALS_QUERY,
+        ),
+        json: build_highlight_config(
+            tree_sitter_json::LANGUAGE.into(),
+            "json",
+            tree_sitter_json::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        ),
+        bash: build_highlight_config(
+            tree_sitter_bash::LANGUAGE.into(),
+            "bash",
+            tree_sitter_bash::HIGHLIGHT_QUERY,
+            "",
+            "",
+        ),
+        yaml: build_highlight_config(
+            tree_sitter_yaml::LANGUAGE.into(),
+            "yaml",
+            tree_sitter_yaml::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        ),
     })
 }
 
-fn build_code_highlighter(
-    language: Option<&str>,
-    theme: ThemePalette,
-) -> Option<HighlightLines<'static>> {
-    let (syntax_set, theme_set) = syntax_assets();
-    let syntax = language
-        .and_then(|lang| syntax_set.find_syntax_by_token(lang))
-        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
-    let syntect_theme = select_syntect_theme(theme_set, theme)?;
-    Some(HighlightLines::new(syntax, syntect_theme))
+fn build_highlight_config(
+    language: Language,
+    name: &str,
+    highlights_query: &str,
+    injections_query: &str,
+    locals_query: &str,
+) -> HighlightConfiguration {
+    let mut config = HighlightConfiguration::new(
+        language,
+        name,
+        highlights_query,
+        injections_query,
+        locals_query,
+    )
+    .expect("load tree-sitter highlight config");
+    config.configure(TREE_SITTER_HIGHLIGHT_NAMES);
+    config
 }
 
-fn select_syntect_theme(theme_set: &ThemeSet, theme: ThemePalette) -> Option<&SyntectTheme> {
-    let preferred = if relative_luminance(theme.base) < 0.5 {
-        "base16-ocean.dark"
-    } else {
-        "InspiredGitHub"
+fn normalize_code_language(language: Option<&str>) -> Option<&'static str> {
+    let lower = language?.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "bash" | "sh" | "shell" | "zsh" => Some("bash"),
+        "js" | "javascript" | "mjs" | "cjs" => Some("javascript"),
+        "json" => Some("json"),
+        "py" | "python" => Some("python"),
+        "rs" | "rust" => Some("rust"),
+        "ts" | "typescript" => Some("typescript"),
+        "tsx" => Some("tsx"),
+        "yaml" | "yml" => Some("yaml"),
+        _ => None,
+    }
+}
+
+fn highlight_config_for_language(
+    language: Option<&str>,
+) -> Option<&'static HighlightConfiguration> {
+    let assets = syntax_assets();
+    match normalize_code_language(language)? {
+        "bash" => Some(&assets.bash),
+        "javascript" => Some(&assets.javascript),
+        "json" => Some(&assets.json),
+        "python" => Some(&assets.python),
+        "rust" => Some(&assets.rust),
+        "tsx" => Some(&assets.tsx),
+        "typescript" => Some(&assets.typescript),
+        "yaml" => Some(&assets.yaml),
+        _ => None,
+    }
+}
+
+fn highlighted_code_lines(
+    code_lines: &[String],
+    language: Option<&str>,
+    fallback_style: Style,
+    theme: ThemePalette,
+) -> Vec<Vec<Span<'static>>> {
+    if code_lines.is_empty() {
+        return Vec::new();
+    }
+
+    let Some(config) = highlight_config_for_language(language) else {
+        return code_lines
+            .iter()
+            .map(|line| vec![Span::styled(line.to_string(), fallback_style)])
+            .collect();
     };
-    theme_set
-        .themes
-        .get(preferred)
-        .or_else(|| theme_set.themes.values().next())
+
+    let source = code_lines.join("\n");
+    let mut highlighter = Highlighter::new();
+    let Ok(events) = highlighter.highlight(config, source.as_bytes(), None, |_| None) else {
+        return code_lines
+            .iter()
+            .map(|line| vec![Span::styled(line.to_string(), fallback_style)])
+            .collect();
+    };
+
+    let mut lines = vec![Vec::new()];
+    let mut stack: Vec<Highlight> = Vec::new();
+
+    for event in events {
+        let Ok(event) = event else {
+            return code_lines
+                .iter()
+                .map(|line| vec![Span::styled(line.to_string(), fallback_style)])
+                .collect();
+        };
+        match event {
+            HighlightEvent::HighlightStart(highlight) => stack.push(highlight),
+            HighlightEvent::HighlightEnd => {
+                let _ = stack.pop();
+            }
+            HighlightEvent::Source { start, end } => {
+                let segment = &source[start..end];
+                let style = style_for_highlight(stack.last().copied(), fallback_style, theme);
+                append_highlighted_segment(&mut lines, segment, style);
+            }
+        }
+    }
+
+    while lines.len() < code_lines.len() {
+        lines.push(Vec::new());
+    }
+
+    lines
+}
+
+fn append_highlighted_segment(lines: &mut Vec<Vec<Span<'static>>>, segment: &str, style: Style) {
+    for (idx, piece) in segment.split('\n').enumerate() {
+        if idx > 0 {
+            lines.push(Vec::new());
+        }
+        if !piece.is_empty() {
+            lines
+                .last_mut()
+                .expect("at least one line")
+                .push(Span::styled(piece.to_string(), style));
+        }
+    }
+}
+
+fn style_for_highlight(
+    highlight: Option<Highlight>,
+    fallback_style: Style,
+    theme: ThemePalette,
+) -> Style {
+    let Some(Highlight(index)) = highlight else {
+        return fallback_style;
+    };
+    let Some(name) = TREE_SITTER_HIGHLIGHT_NAMES.get(index).copied() else {
+        return fallback_style;
+    };
+
+    let token_style = if name.starts_with("comment") {
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::ITALIC)
+    } else if name.starts_with("string") {
+        Style::default().fg(theme.warn)
+    } else if name.starts_with("keyword") || name.starts_with("operator") {
+        Style::default()
+            .fg(theme.title_value)
+            .add_modifier(Modifier::BOLD)
+    } else if name.starts_with("function") || name == "constructor" {
+        Style::default().fg(theme.title_value_alt)
+    } else if name.starts_with("type") || name == "attribute" {
+        Style::default().fg(theme.user)
+    } else if name.starts_with("number") || name.starts_with("constant") {
+        Style::default().fg(theme.info)
+    } else if name.starts_with("variable.parameter") {
+        Style::default()
+            .fg(theme.title_meta)
+            .add_modifier(Modifier::ITALIC)
+    } else if name.starts_with("punctuation") {
+        Style::default().fg(theme.title_meta)
+    } else if name == "tag" || name == "property" || name == "module" {
+        Style::default().fg(theme.assistant)
+    } else {
+        Style::default().fg(theme.text)
+    };
+
+    fallback_style.patch(token_style)
 }
 
 fn markdown_line_spans(line: &str, theme: ThemePalette) -> Vec<Span<'static>> {
@@ -3499,33 +3732,6 @@ fn parse_markdown_list_item(line: &str) -> Option<&str> {
         return Some(&line[digits + 2..]);
     }
     None
-}
-
-fn highlighted_code_spans(
-    line: &str,
-    highlighter: &mut Option<HighlightLines<'static>>,
-    fallback_style: Style,
-) -> Vec<Span<'static>> {
-    let Some(highlighter) = highlighter.as_mut() else {
-        return vec![Span::styled(line.to_string(), fallback_style)];
-    };
-    let (syntax_set, _) = syntax_assets();
-    let Ok(ranges) = highlighter.highlight_line(line, syntax_set) else {
-        return vec![Span::styled(line.to_string(), fallback_style)];
-    };
-    if ranges.is_empty() {
-        return vec![Span::styled(line.to_string(), fallback_style)];
-    }
-    ranges
-        .into_iter()
-        .map(|(style, segment)| {
-            let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
-            Span::styled(
-                segment.to_string(),
-                fallback_style.patch(Style::default().fg(fg)),
-            )
-        })
-        .collect()
 }
 
 fn compact_footer_help(mode: InputMode, is_busy: bool) -> String {
