@@ -99,12 +99,12 @@ impl CredentialManager {
             }));
         }
 
-        if let Some(env_var) = env_var_name(target) {
-            if let Some(secret) = env::var_os(&env_var) {
-                let secret = secret.to_string_lossy().trim().to_string();
-                if !secret.is_empty() {
-                    return Ok(Some(ResolvedCredential { secret }));
-                }
+        if let Some(env_var) = env_var_name(target)
+            && let Some(secret) = env::var_os(&env_var)
+        {
+            let secret = secret.to_string_lossy().trim().to_string();
+            if !secret.is_empty() {
+                return Ok(Some(ResolvedCredential { secret }));
             }
         }
 
@@ -144,7 +144,7 @@ impl CredentialManager {
             let env_var = env_var_name(&target);
             let has_env = env_var
                 .as_ref()
-                .and_then(|name| env::var_os(name))
+                .and_then(env::var_os)
                 .map(|value| !value.to_string_lossy().trim().is_empty())
                 .unwrap_or(false);
             let has_keychain = self.store.get_secret(&target)?.is_some();

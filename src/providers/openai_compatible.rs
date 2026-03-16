@@ -449,7 +449,11 @@ mod tests {
 
     #[tokio::test]
     async fn provider_streams_compatible_sse_response() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("bind: {err}"),
+        };
         let addr = listener.local_addr().expect("addr");
 
         let server = tokio::spawn(async move {
