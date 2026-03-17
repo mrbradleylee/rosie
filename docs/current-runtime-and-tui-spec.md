@@ -29,8 +29,19 @@ Current provider scope:
   - `execution_enabled`
 - Auth commands:
   - `rosie auth add <provider>`
+  - `rosie auth login <provider>`
   - `rosie auth list`
+  - `rosie auth logout <provider>`
   - `rosie auth remove <provider>`
+- Native auth:
+  - `openai` uses native CLI login via `rosie auth login openai`
+  - native `openai` follows ChatGPT/Codex usage limits rather than OpenAI API-key billing
+  - OpenAI API access now uses a named `openai-compatible` provider
+  - the OpenAI API path may incur standard API billing
+- Native OpenAI model selection:
+  - built-in validated presets are used in `--config` and the TUI model picker
+  - the current validated ChatGPT-backed set is `gpt-5-codex` and `gpt-5`
+  - the TUI model picker supports switching to manual entry
 - Model resolution order:
   1. `--model`
   2. active provider config `model`

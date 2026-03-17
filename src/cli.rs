@@ -50,7 +50,9 @@ pub struct AuthCommand {
 #[derive(clap::Subcommand, Debug)]
 pub enum AuthAction {
     Add { provider: String },
+    Login { provider: String },
     List,
+    Logout { provider: String },
     Remove { provider: String },
 }
 

@@ -9,7 +9,6 @@ const KEYRING_SERVICE: &str = "rosie";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CredentialTarget {
-    OpenAi,
     Anthropic,
     NamedProvider(String),
 }
@@ -17,7 +16,6 @@ pub enum CredentialTarget {
 impl fmt::Display for CredentialTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::OpenAi => write!(f, "openai"),
             Self::Anthropic => write!(f, "anthropic"),
             Self::NamedProvider(name) => write!(f, "{name}"),
         }
@@ -35,6 +33,31 @@ pub struct CredentialStatus {
     pub env_var: Option<String>,
     pub has_env: bool,
     pub has_keychain: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthKind {
+    Native,
+    ApiKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeAuthStatus {
+    pub cli_available: bool,
+    pub logged_in: bool,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderAuthStatus {
+    pub provider_name: String,
+    pub auth_kind: AuthKind,
+    pub env_var: Option<String>,
+    pub has_env: bool,
+    pub has_keychain: bool,
+    pub cli_available: bool,
+    pub logged_in: bool,
+    pub detail: Option<String>,
 }
 
 pub trait SecretStore: Send + Sync {
@@ -127,7 +150,7 @@ impl CredentialManager {
     }
 
     pub fn list_statuses(&self, config: Option<&StoredConfig>) -> Result<Vec<CredentialStatus>> {
-        let mut targets = vec![CredentialTarget::OpenAi, CredentialTarget::Anthropic];
+        let mut targets = vec![CredentialTarget::Anthropic];
         if let Some(config) = config {
             for (name, provider) in &config.providers {
                 if matches!(provider, ProviderConfig::OpenAiCompatible { .. }) {
@@ -158,6 +181,45 @@ impl CredentialManager {
 
         Ok(statuses)
     }
+
+    pub fn list_provider_auth_statuses<F>(
+        &self,
+        config: Option<&StoredConfig>,
+        native_status_for_provider: F,
+    ) -> Result<Vec<ProviderAuthStatus>>
+    where
+        F: Fn(&str) -> Option<NativeAuthStatus>,
+    {
+        let mut statuses = Vec::new();
+
+        if let Some(status) = native_status_for_provider("openai") {
+            statuses.push(ProviderAuthStatus {
+                provider_name: "openai".to_string(),
+                auth_kind: AuthKind::Native,
+                env_var: None,
+                has_env: false,
+                has_keychain: false,
+                cli_available: status.cli_available,
+                logged_in: status.logged_in,
+                detail: Some(status.detail),
+            });
+        }
+
+        for status in self.list_statuses(config)? {
+            statuses.push(ProviderAuthStatus {
+                provider_name: status.target.to_string(),
+                auth_kind: AuthKind::ApiKey,
+                env_var: status.env_var,
+                has_env: status.has_env,
+                has_keychain: status.has_keychain,
+                cli_available: false,
+                logged_in: false,
+                detail: None,
+            });
+        }
+
+        Ok(statuses)
+    }
 }
 
 pub fn credential_target_for_provider(
@@ -166,7 +228,7 @@ pub fn credential_target_for_provider(
 ) -> Result<Option<CredentialTarget>> {
     match provider {
         ProviderConfig::Ollama { .. } => Ok(None),
-        ProviderConfig::OpenAi { .. } => Ok(Some(CredentialTarget::OpenAi)),
+        ProviderConfig::OpenAi { .. } => Ok(None),
         ProviderConfig::Anthropic { .. } => Ok(Some(CredentialTarget::Anthropic)),
         ProviderConfig::OpenAiCompatible { .. } => Ok(Some(CredentialTarget::NamedProvider(
             provider_name.to_string(),
@@ -178,10 +240,13 @@ pub fn credential_target_from_name(
     config: Option<&StoredConfig>,
     provider_name: &str,
 ) -> Result<CredentialTarget> {
-    match provider_name {
-        "openai" => return Ok(CredentialTarget::OpenAi),
-        "anthropic" => return Ok(CredentialTarget::Anthropic),
-        _ => {}
+    if provider_name == "openai" {
+        return Err(anyhow!(
+            "Provider 'openai' uses native login. Run `rosie auth login openai`."
+        ));
+    }
+    if provider_name == "anthropic" {
+        return Ok(CredentialTarget::Anthropic);
     }
 
     let config = config.ok_or_else(|| {
@@ -197,7 +262,6 @@ pub fn credential_target_from_name(
 
 pub fn env_var_name(target: &CredentialTarget) -> Option<String> {
     match target {
-        CredentialTarget::OpenAi => Some("OPENAI_API_KEY".to_string()),
         CredentialTarget::Anthropic => Some("ANTHROPIC_API_KEY".to_string()),
         CredentialTarget::NamedProvider(name) => {
             Some(format!("ROSIE_{}_API_KEY", normalize_env_name(name)))
@@ -207,7 +271,6 @@ pub fn env_var_name(target: &CredentialTarget) -> Option<String> {
 
 fn account_name(target: &CredentialTarget) -> Cow<'_, str> {
     match target {
-        CredentialTarget::OpenAi => Cow::Borrowed("openai"),
         CredentialTarget::Anthropic => Cow::Borrowed("anthropic"),
         CredentialTarget::NamedProvider(name) => Cow::Owned(format!("provider:{name}")),
     }
@@ -228,7 +291,8 @@ fn normalize_env_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialManager, CredentialTarget, SecretStore, credential_target_from_name, env_var_name,
+        AuthKind, CredentialManager, CredentialTarget, NativeAuthStatus, ProviderAuthStatus,
+        SecretStore, credential_target_from_name, env_var_name,
     };
     use crate::config::{ProviderConfig, StoredConfig};
     use anyhow::Result;
@@ -286,11 +350,11 @@ mod tests {
     fn resolve_prefers_keychain_after_env_miss() {
         let manager = CredentialManager::with_store(Arc::new(MemoryStore::new()));
         manager
-            .set(&CredentialTarget::OpenAi, "test-secret")
+            .set(&CredentialTarget::Anthropic, "test-secret")
             .expect("set secret");
 
         let resolved = manager
-            .resolve(&CredentialTarget::OpenAi, None)
+            .resolve(&CredentialTarget::Anthropic, None)
             .expect("resolve")
             .expect("credential");
         assert_eq!(resolved.secret, "test-secret");
@@ -316,5 +380,59 @@ mod tests {
 
         let target = credential_target_from_name(Some(&config), "local").expect("target");
         assert_eq!(target, CredentialTarget::NamedProvider("local".to_string()));
+    }
+
+    #[test]
+    fn openai_requires_native_login() {
+        let err = credential_target_from_name(None, "openai").expect_err("openai should fail");
+        assert!(err.to_string().contains("Run `rosie auth login openai`"));
+    }
+
+    #[test]
+    fn list_provider_auth_statuses_includes_native_and_api_key_entries() {
+        let manager = CredentialManager::with_store(Arc::new(MemoryStore::new()));
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "local".to_string(),
+            ProviderConfig::OpenAiCompatible {
+                endpoint: "https://api.openai.com/v1".to_string(),
+                model: Some("gpt-5".to_string()),
+                allow_insecure_http: false,
+            },
+        );
+        let config = StoredConfig {
+            active_provider: Some("local".to_string()),
+            providers,
+            theme: None,
+            execution_enabled: Some(true),
+        };
+
+        let statuses = manager
+            .list_provider_auth_statuses(Some(&config), |provider_name| {
+                (provider_name == "openai").then(|| NativeAuthStatus {
+                    cli_available: true,
+                    logged_in: true,
+                    detail: "Logged in using ChatGPT".to_string(),
+                })
+            })
+            .expect("list statuses");
+
+        assert_eq!(
+            statuses[0],
+            ProviderAuthStatus {
+                provider_name: "openai".to_string(),
+                auth_kind: AuthKind::Native,
+                env_var: None,
+                has_env: false,
+                has_keychain: false,
+                cli_available: true,
+                logged_in: true,
+                detail: Some("Logged in using ChatGPT".to_string()),
+            }
+        );
+        assert_eq!(statuses[1].provider_name, "anthropic");
+        assert_eq!(statuses[1].auth_kind, AuthKind::ApiKey);
+        assert_eq!(statuses[2].provider_name, "local");
+        assert_eq!(statuses[2].env_var, Some("ROSIE_LOCAL_API_KEY".to_string()));
     }
 }
