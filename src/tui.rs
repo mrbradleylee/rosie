@@ -3,6 +3,7 @@ use crate::provider::{
     ChatRequest as ProviderChatRequest, Message as ProviderMessage, ProviderEvent, ProviderRouter,
     Role as ProviderRole,
 };
+use crate::providers::openai::native_openai_model_presets;
 use crate::theme::{ThemePalette, config_dir_from_env, discover_config_theme_names, resolve_theme};
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -847,6 +848,13 @@ fn handle_model_select_input(app: &mut AppState, key: KeyEvent) -> bool {
             app.mode = primary_mode_for_app(app);
             app.status_message = "Model picker cancelled.".to_string();
         }
+        KeyCode::Char('i') => enter_manual_model_entry_with_status(
+            app,
+            format!(
+                "Preset list open for {}. Type a model name and press Enter to apply it.",
+                app.provider_name
+            ),
+        ),
         KeyCode::Char('j') | KeyCode::Down => {
             if !app.model_options.is_empty() {
                 app.model_selected_index =
@@ -1436,7 +1444,7 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, app: &mut AppState, theme: Theme
         } else if app.model_options.is_empty() {
             rows.push(format!("No models available from {}.", app.provider_name));
         } else {
-            rows.push("Select a model (Enter to apply):".to_string());
+            rows.push("Select a model (Enter to apply, i for manual entry):".to_string());
             rows.push(String::new());
             for (idx, model) in app.model_options.iter().enumerate() {
                 let marker = if idx == app.model_selected_index {
@@ -2521,6 +2529,10 @@ fn open_model_picker(app: &mut AppState) {
         return;
     }
 
+    if apply_provider_model_presets(app) {
+        return;
+    }
+
     match provider_supports_model_discovery(&app.config) {
         Ok(true) => {}
         Ok(false) => {
@@ -2556,6 +2568,32 @@ fn open_model_picker(app: &mut AppState) {
         receiver: rx,
         handle,
     });
+}
+
+fn apply_provider_model_presets(app: &mut AppState) -> bool {
+    let Ok((_, provider)) = app.config.active_provider_entry() else {
+        return false;
+    };
+
+    let presets = match provider {
+        ProviderConfig::OpenAi { .. } => native_openai_model_presets(),
+        _ => return false,
+    };
+
+    app.model_options = presets;
+    app.model_loading = false;
+    app.model_manual_entry = false;
+    app.model_input.clear();
+    app.model_selected_index = app
+        .model_options
+        .iter()
+        .position(|name| name == &app.model)
+        .unwrap_or(0);
+    app.status_message = format!(
+        "Loaded {} built-in model preset(s). Press i for manual entry.",
+        app.model_options.len()
+    );
+    true
 }
 
 const MODEL_CACHE_TTL_SECS: i64 = 60;
@@ -4048,10 +4086,7 @@ fn provider_cache_key(config: &StoredConfig) -> Result<String> {
     let (provider_name, provider) = config.active_provider_entry()?;
     let key = match provider {
         ProviderConfig::Ollama { endpoint, .. } => format!("{provider_name}:{endpoint}"),
-        ProviderConfig::OpenAi { endpoint, .. } => format!(
-            "{provider_name}:{}",
-            endpoint.as_deref().unwrap_or("https://api.openai.com/v1")
-        ),
+        ProviderConfig::OpenAi { .. } => format!("{provider_name}:native"),
         ProviderConfig::Anthropic { endpoint, .. } => format!(
             "{provider_name}:{}",
             endpoint
@@ -4064,15 +4099,22 @@ fn provider_cache_key(config: &StoredConfig) -> Result<String> {
 }
 
 fn enter_manual_model_entry(app: &mut AppState) {
+    enter_manual_model_entry_with_status(
+        app,
+        format!(
+            "Model discovery isn't available for {}. Type a model name to continue.",
+            app.provider_name
+        ),
+    );
+}
+
+fn enter_manual_model_entry_with_status(app: &mut AppState, status_message: String) {
     app.model_loading = false;
     app.model_manual_entry = true;
     app.model_options.clear();
     app.model_selected_index = 0;
     app.model_input = app.model.clone();
-    app.status_message = format!(
-        "Model discovery isn't available for {}. Type a model name to continue.",
-        app.provider_name
-    );
+    app.status_message = status_message;
 }
 
 fn normalize_generated_title(raw: &str) -> String {

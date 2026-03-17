@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+
+- Reinterpreted `type = "openai"` as native ChatGPT-backed auth/runtime via the local OpenAI CLI, including new `rosie auth login|logout openai` commands
+- Moved OpenAI API-key usage to named `openai-compatible` providers and reject legacy `openai` configs that still set `endpoint`
+- Deprecated `rosie auth add|remove openai` in favor of native login, while keeping keychain auth for Anthropic and named `openai-compatible` providers
+- Added built-in native OpenAI model presets for `--config` and the TUI model picker, while keeping manual model entry available as an escape hatch; the current validated ChatGPT-backed set is `gpt-5-codex` and `gpt-5`
+- Documented that native `openai` follows ChatGPT/Codex limits and that `openai-compatible` with the official OpenAI endpoint is the API-key path that may incur standard API billing
+
 ## 0.9.0
 
 ### Changed

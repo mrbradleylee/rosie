@@ -169,13 +169,19 @@ Display version information and exit.
 Print help information.
 .TP
 .B rosie auth add
-Store a provider API key in the OS keychain.
+Store a provider API key in the OS keychain for key-based providers.
+.TP
+.B rosie auth login
+Start native provider login. OpenAI uses the local Codex CLI login flow.
 .TP
 .B rosie auth list
-Show whether provider credentials are available from environment variables or keychain storage.
+Show native login state and whether key-based provider credentials are available from environment variables or keychain storage.
+.TP
+.B rosie auth logout
+Remove native provider login state.
 .TP
 .B rosie auth remove
-Delete a provider API key from the OS keychain.
+Delete a provider API key from the OS keychain for key-based providers.
 .SH CONFIGURATION
 Rosie uses file-based configuration:
 .TP
@@ -230,14 +236,29 @@ active provider
 .IP "3." 4
 first provider-discovered model when supported
 .PP
-API keys resolve from provider-specific environment variables first and then the OS keychain. OpenAI uses
-.BR OPENAI_API_KEY ,
-Anthropic uses
+Native
+.B openai
+uses
+.BR "rosie auth login openai" ,
+which delegates to the local Codex CLI and follows ChatGPT/Codex limits rather than OpenAI API-key billing.
+API keys resolve from provider-specific environment variables first and then the OS keychain. Anthropic uses
 .BR ANTHROPIC_API_KEY ,
 and named compatible providers use
 .BR ROSIE_<PROVIDER_NAME>_API_KEY .
 .PP
-OpenAI and Anthropic endpoints must use HTTPS. OpenAI-compatible endpoints may use plain HTTP on localhost, loopback IPs, and
+Native
+.B openai
+does not accept
+.BR endpoint .
+The validated ChatGPT-backed native model set currently includes
+.BR gpt-5-codex " and " gpt-5 .
+Other model names may be rejected by Codex even if they exist in OpenAI's API or ChatGPT product lineup.
+.PP
+Use
+.B openai-compatible
+with the official OpenAI endpoint when you want API-key billing and quotas instead of ChatGPT/Codex-native usage.
+.PP
+Anthropic endpoints must use HTTPS. OpenAI-compatible endpoints may use plain HTTP on localhost, loopback IPs, and
 .B 192.168.x.x
 by default; other non-HTTPS hosts require
 .BR allow_insecure_http " = true" .

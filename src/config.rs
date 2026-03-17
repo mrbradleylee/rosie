@@ -1,7 +1,6 @@
 use crate::paths::config_path;
 use crate::providers::anthropic::DEFAULT_ANTHROPIC_ENDPOINT;
 use crate::providers::ollama::DEFAULT_OLLAMA_ENDPOINT;
-use crate::providers::openai::DEFAULT_OPENAI_ENDPOINT;
 use crate::providers::openai_compatible::validate_compatible_endpoint;
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -29,9 +28,9 @@ pub enum ProviderConfig {
     #[serde(rename = "openai")]
     OpenAi {
         #[serde(default)]
-        endpoint: Option<String>,
-        #[serde(default)]
         model: Option<String>,
+        #[serde(default)]
+        endpoint: Option<String>,
     },
     Anthropic {
         #[serde(default)]
@@ -110,10 +109,14 @@ pub fn validate_config(config: &StoredConfig) -> Result<()> {
             validate_endpoint(endpoint)?;
         }
         ProviderConfig::OpenAi { endpoint, .. } => {
-            validate_https_endpoint(
-                endpoint.as_deref().unwrap_or(DEFAULT_OPENAI_ENDPOINT),
-                "OpenAI",
-            )?;
+            if endpoint
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                return Err(anyhow!(
+                    "OpenAI no longer accepts `endpoint`. Use `type = \"openai-compatible\"` with `endpoint = \"https://api.openai.com/v1\"` for API-key access."
+                ));
+            }
         }
         ProviderConfig::Anthropic { endpoint, .. } => {
             validate_https_endpoint(
@@ -196,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_https_openai_endpoint() {
+    fn rejects_openai_endpoint_migration_path() {
         let config: StoredConfig = toml::from_str(
             r#"
             active_provider = "openai"
@@ -209,7 +212,10 @@ mod tests {
         )
         .expect("parse config");
 
-        let err = validate_config(&config).expect_err("http openai should fail");
-        assert!(err.to_string().contains("OpenAI endpoints must use HTTPS"));
+        let err = validate_config(&config).expect_err("openai endpoint should fail");
+        assert!(
+            err.to_string()
+                .contains("OpenAI no longer accepts `endpoint`")
+        );
     }
 }

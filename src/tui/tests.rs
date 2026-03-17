@@ -62,6 +62,24 @@ fn anthropic_config() -> StoredConfig {
     }
 }
 
+fn native_openai_config() -> StoredConfig {
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "openai".to_string(),
+        ProviderConfig::OpenAi {
+            model: Some("gpt-5".to_string()),
+            endpoint: None,
+        },
+    );
+
+    StoredConfig {
+        active_provider: Some("openai".to_string()),
+        providers,
+        theme: None,
+        execution_enabled: Some(true),
+    }
+}
+
 fn line_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
@@ -177,6 +195,68 @@ async fn open_model_picker_uses_manual_entry_when_discovery_is_unavailable() {
         assert_eq!(
             app.status_message,
             "Model discovery isn't available for anthropic. Type a model name to continue."
+        );
+    }
+
+    let _ = fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn open_model_picker_uses_native_openai_presets() {
+    let db_path = temp_db_path("model-picker-openai-presets");
+
+    {
+        let store = SessionStore::open(&db_path).expect("open");
+        let loaded = store.load_or_create_active_session().expect("load");
+        let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+        app.config = native_openai_config();
+        app.provider_name = "openai".to_string();
+        app.model = "gpt-5".to_string();
+
+        open_model_picker(&mut app);
+
+        assert_eq!(app.mode, InputMode::ModelSelect);
+        assert!(!app.model_manual_entry);
+        assert!(!app.model_loading);
+        assert_eq!(app.model_selected_index, 1);
+        assert_eq!(
+            app.model_options,
+            vec!["gpt-5-codex".to_string(), "gpt-5".to_string()]
+        );
+        assert_eq!(
+            app.status_message,
+            "Loaded 2 built-in model preset(s). Press i for manual entry."
+        );
+    }
+
+    let _ = fs::remove_file(&db_path);
+}
+
+#[test]
+fn model_picker_can_switch_from_presets_to_manual_entry() {
+    let db_path = temp_db_path("model-picker-openai-manual-switch");
+
+    {
+        let store = SessionStore::open(&db_path).expect("open");
+        let loaded = store.load_or_create_active_session().expect("load");
+        let mut app = build_app_from_store(store, loaded.session_id, loaded.messages);
+        app.config = native_openai_config();
+        app.provider_name = "openai".to_string();
+        app.model = "gpt-5".to_string();
+        app.mode = InputMode::ModelSelect;
+        app.model_options = vec!["gpt-5".to_string(), "gpt-5-mini".to_string()];
+
+        handle_model_select_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+        );
+
+        assert!(app.model_manual_entry);
+        assert!(app.model_options.is_empty());
+        assert_eq!(app.model_input, "gpt-5");
+        assert_eq!(
+            app.status_message,
+            "Preset list open for openai. Type a model name and press Enter to apply it."
         );
     }
 

@@ -13,13 +13,16 @@ mod tui;
 use anyhow::{Result, anyhow};
 use cli::{AuthAction, Command as CliCommand, parse_args};
 use config::{ProviderConfig, StoredConfig, load_config};
-use credentials::{CredentialManager, credential_target_from_name, env_var_name};
+use credentials::{AuthKind, CredentialManager, credential_target_from_name, env_var_name};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use install::install;
 use llm::{GeneratedCommand, generate_chat_with_spinner, generate_command_with_spinner};
 use paths::{app_data_dir, config_path};
 use providers::ollama::{DEFAULT_OLLAMA_ENDPOINT, discover_ollama_models};
+use providers::openai::{
+    native_openai_model_presets, openai_login_status, run_openai_login, run_openai_logout,
+};
 use std::env;
 use std::fs;
 use std::io;
@@ -321,23 +324,65 @@ fn handle_auth_command(action: AuthAction) -> Result<()> {
             }
             Ok(())
         }
+        AuthAction::Login { provider } => {
+            if provider != "openai" {
+                return Err(anyhow!(
+                    "Native login is currently only supported for 'openai'."
+                ));
+            }
+            run_openai_login()
+        }
         AuthAction::List => {
-            let statuses = manager.list_statuses(config.as_ref())?;
+            let statuses = manager
+                .list_provider_auth_statuses(config.as_ref(), |provider_name| {
+                    (provider_name == "openai").then(openai_login_status)
+                })?;
             for status in statuses {
-                let env_label = status.env_var.unwrap_or_else(|| "-".to_string());
-                println!(
-                    "{}: env={} ({}) keychain={}",
-                    status.target,
-                    env_label,
-                    if status.has_env { "set" } else { "unset" },
-                    if status.has_keychain {
-                        "stored"
-                    } else {
-                        "empty"
+                match status.auth_kind {
+                    AuthKind::Native => {
+                        println!(
+                            "{}: native cli={} login={}",
+                            status.provider_name,
+                            if status.cli_available {
+                                "available"
+                            } else {
+                                "missing"
+                            },
+                            if status.logged_in {
+                                "logged-in"
+                            } else {
+                                "logged-out"
+                            }
+                        );
                     }
-                );
+                    AuthKind::ApiKey => {
+                        let env_label = status.env_var.unwrap_or_else(|| "-".to_string());
+                        println!(
+                            "{}: env={} ({}) keychain={}",
+                            status.provider_name,
+                            env_label,
+                            if status.has_env { "set" } else { "unset" },
+                            if status.has_keychain {
+                                "stored"
+                            } else {
+                                "empty"
+                            }
+                        );
+                    }
+                }
+                if let Some(detail) = status.detail.filter(|value| !value.trim().is_empty()) {
+                    println!("  {}", detail.trim());
+                }
             }
             Ok(())
+        }
+        AuthAction::Logout { provider } => {
+            if provider != "openai" {
+                return Err(anyhow!(
+                    "Native logout is currently only supported for 'openai'."
+                ));
+            }
+            run_openai_logout()
         }
         AuthAction::Remove { provider } => {
             let target = credential_target_from_name(config.as_ref(), &provider)?;
@@ -378,20 +423,20 @@ async fn configure_provider(
     match provider_kind.as_str() {
         "ollama" => configure_ollama_provider(existing_provider).await,
         "openai" => {
-            let (current_endpoint, current_model) = match existing_provider {
-                ProviderConfig::OpenAi { endpoint, model } => {
-                    (endpoint.as_deref(), model.as_deref())
-                }
-                _ => (None, None),
+            let current_model = match existing_provider {
+                ProviderConfig::OpenAi { model, .. } => model.as_deref(),
+                _ => None,
             };
-            let endpoint = prompt_config_value(
-                "OpenAI endpoint (optional, defaults to official API)",
-                current_endpoint,
-                true,
-            )?;
+            let models = native_openai_model_presets();
             Ok(ProviderConfig::OpenAi {
-                endpoint: normalize_config_value(endpoint),
-                model: normalize_config_value(prompt_config_value("Model", current_model, false)?),
+                model: normalize_config_value(prompt_model_with_confirmation(
+                    "Model",
+                    current_model,
+                    false,
+                    &models,
+                    None,
+                )?),
+                endpoint: None,
             })
         }
         "anthropic" => {
@@ -657,5 +702,53 @@ fn prompt_continue_or_exit(reason: &str) -> Result<bool> {
         }
 
         println!("Please enter 'c' to continue or 'e' to exit.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_auth_command;
+    use crate::cli::AuthAction;
+
+    #[test]
+    fn auth_add_openai_is_deprecated() {
+        let err = handle_auth_command(AuthAction::Add {
+            provider: "openai".to_string(),
+        })
+        .expect_err("openai add should be rejected");
+        assert!(err.to_string().contains("Run `rosie auth login openai`"));
+    }
+
+    #[test]
+    fn auth_remove_openai_is_deprecated() {
+        let err = handle_auth_command(AuthAction::Remove {
+            provider: "openai".to_string(),
+        })
+        .expect_err("openai remove should be rejected");
+        assert!(err.to_string().contains("Run `rosie auth login openai`"));
+    }
+
+    #[test]
+    fn auth_login_only_supports_openai() {
+        let err = handle_auth_command(AuthAction::Login {
+            provider: "anthropic".to_string(),
+        })
+        .expect_err("native login should be limited to openai");
+        assert!(
+            err.to_string()
+                .contains("currently only supported for 'openai'")
+        );
+    }
+
+    #[test]
+    fn auth_logout_only_supports_openai() {
+        let err = handle_auth_command(AuthAction::Logout {
+            provider: "anthropic".to_string(),
+        })
+        .expect_err("native logout should be limited to openai");
+        assert!(
+            err.to_string()
+                .contains("currently only supported for 'openai'")
+        );
     }
 }

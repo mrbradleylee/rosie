@@ -15,11 +15,11 @@ Running `rosie` with no mode flag launches the full-screen TUI chat interface (l
 - `--model <MODEL>` runtime model override for `--ask`, `--cmd`, and TUI launch
 - Provider-driven model defaults in `~/.config/rosie/config.toml`
 - Interactive `--config` flow with provider-aware setup
-- `rosie auth add|list|remove` for API-key management
+- `rosie auth login|logout|list` for native OpenAI auth and `auth add|remove` for API-key providers
 - Local install helper via `rosie --install`
 - Cross-platform Rust binary (Linux/macOS/Windows with Rust toolchain)
 
-Rosie now routes `--ask`, `--cmd`, and TUI chat through Ollama, OpenAI, Anthropic, and OpenAI-compatible providers.
+Rosie now routes `--ask`, `--cmd`, and TUI chat through Ollama, native OpenAI, Anthropic, and OpenAI-compatible providers.
 
 ## Installation
 
@@ -52,8 +52,10 @@ rosie
 # Configure Rosie provider settings
 rosie --config
 
-# Store an API key in the OS keychain
-rosie auth add openai
+# Log in to native OpenAI / ChatGPT
+rosie auth login openai
+
+# Store API keys for API-backed providers
 rosie auth add anthropic
 rosie auth add local
 
@@ -110,6 +112,7 @@ In the default TUI:
 - in session manager, use `j`/`k` to select and `Enter` switch, `n` new, `r` rename, `d` delete (with confirmation), `Esc` close
 - delete actions require confirmation (`[Y/n]`; `Enter` defaults to `Y`)
 - in the model picker, use `j`/`k` (or arrows) to move when discovery is available; otherwise type a model name directly, then press `Enter` to apply or `Esc` to cancel
+- native `openai` uses built-in model presets in the picker and supports `i` to switch to manual model entry
 - selected models are persisted per session and restored when you switch sessions/restart
 - press `Esc` in `Normal` to cancel an in-flight request
 - `Ctrl+C` quits from any mode
@@ -139,13 +142,14 @@ That command creates/updates config and prompts for:
 - one provider block under `[providers.<name>]`
 - `execution_enabled` (controls whether execute is allowed in `--cmd`)
 
-Credential resolution order:
-1. environment variable
-2. OS keychain via `rosie auth add <provider>`
-3. error
+Authentication:
+- native `openai` uses `rosie auth login openai` / `rosie auth logout openai`
+- native `openai` uses the local Codex CLI with your ChatGPT login, so usage follows ChatGPT/Codex limits rather than OpenAI API-key billing
+- API-backed providers resolve credentials from environment variables first and then the OS keychain
+- key-based providers use `rosie auth add <provider>` and `rosie auth remove <provider>`
+- `openai-compatible` with `https://api.openai.com/v1` is the API path and may incur standard OpenAI API charges
 
-Credential environment variables:
-- `OPENAI_API_KEY`
+Credential environment variables for API-backed providers:
 - `ANTHROPIC_API_KEY`
 - `ROSIE_<PROVIDER_NAME>_API_KEY` for named `openai-compatible` providers
 
@@ -166,6 +170,24 @@ endpoint = "http://localhost:11434"
 model = "llama3.2"
 ```
 
+Example native OpenAI config:
+
+```toml
+active_provider = "openai"
+
+[providers.openai]
+type = "openai"
+model = "gpt-5-codex"
+```
+
+Built-in native OpenAI model presets currently include:
+- `gpt-5-codex`
+- `gpt-5`
+
+These are the currently validated model IDs for the ChatGPT-backed Codex path Rosie uses. Other ChatGPT or API model names may be rejected by Codex even if they exist elsewhere in OpenAI's product lineup.
+
+You can still type another model name manually in the TUI model picker by pressing `i`, but Rosie treats that as an advanced override and Codex may reject it for ChatGPT-backed usage.
+
 Example OpenAI-compatible config:
 
 ```toml
@@ -177,6 +199,19 @@ endpoint = "http://192.168.1.20:8080/v1"
 model = "omnicoder-9b"
 allow_insecure_http = false
 ```
+
+OpenAI API access now uses `openai-compatible`. Example:
+
+```toml
+active_provider = "oai-http"
+
+[providers.oai-http]
+type = "openai-compatible"
+endpoint = "https://api.openai.com/v1"
+model = "gpt-5"
+```
+
+Use the API-backed `openai-compatible` path when you specifically want OpenAI API-key billing/quotas instead of ChatGPT/Codex-native usage.
 
 Theme file schema (preferred):
 
@@ -229,7 +264,8 @@ Model resolution order:
 If no model can be resolved, Rosie exits with an actionable error.
 
 Remote transport rules:
-- OpenAI and Anthropic endpoints must use HTTPS
+- native `openai` uses the local OpenAI CLI login/runtime and does not accept `endpoint`
+- Anthropic endpoints must use HTTPS
 - OpenAI-compatible endpoints may use plain HTTP on `localhost`, loopback IPs, and `192.168.x.x`
 - other non-HTTPS OpenAI-compatible endpoints require `allow_insecure_http = true`
 

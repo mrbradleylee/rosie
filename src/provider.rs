@@ -103,11 +103,9 @@ impl ProviderRouter {
             ProviderConfig::Ollama { endpoint, model } => {
                 Arc::new(OllamaProvider::new(endpoint.clone(), model.clone()))
             }
-            ProviderConfig::OpenAi { endpoint, model } => Arc::new(OpenAiProvider::new(
-                endpoint.clone(),
-                model.clone(),
-                credentials.clone(),
-            )),
+            ProviderConfig::OpenAi { model, .. } => {
+                Arc::new(OpenAiProvider::new(model.clone(), credentials.clone()))
+            }
             ProviderConfig::Anthropic { endpoint, model } => Arc::new(AnthropicProvider::new(
                 endpoint.clone(),
                 model.clone(),
