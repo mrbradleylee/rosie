@@ -13,9 +13,7 @@ mod tui;
 use anyhow::{Result, anyhow};
 use cli::{AuthAction, Command as CliCommand, parse_args};
 use config::{ProviderConfig, StoredConfig, load_config};
-use credentials::{
-    AuthKind, CredentialManager, credential_target_from_name, env_var_name,
-};
+use credentials::{AuthKind, CredentialManager, credential_target_from_name, env_var_name};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use install::install;
@@ -335,8 +333,8 @@ fn handle_auth_command(action: AuthAction) -> Result<()> {
             run_openai_login()
         }
         AuthAction::List => {
-            let statuses =
-                manager.list_provider_auth_statuses(config.as_ref(), |provider_name| {
+            let statuses = manager
+                .list_provider_auth_statuses(config.as_ref(), |provider_name| {
                     (provider_name == "openai").then(openai_login_status)
                 })?;
             for status in statuses {
@@ -485,56 +483,6 @@ async fn configure_provider(
             })
         }
         _ => Err(anyhow!("Unsupported provider type '{}'", provider_kind)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::handle_auth_command;
-    use crate::cli::AuthAction;
-
-    #[test]
-    fn auth_add_openai_is_deprecated() {
-        let err = handle_auth_command(AuthAction::Add {
-            provider: "openai".to_string(),
-        })
-        .expect_err("openai add should be rejected");
-        assert!(err
-            .to_string()
-            .contains("Run `rosie auth login openai`"));
-    }
-
-    #[test]
-    fn auth_remove_openai_is_deprecated() {
-        let err = handle_auth_command(AuthAction::Remove {
-            provider: "openai".to_string(),
-        })
-        .expect_err("openai remove should be rejected");
-        assert!(err
-            .to_string()
-            .contains("Run `rosie auth login openai`"));
-    }
-
-    #[test]
-    fn auth_login_only_supports_openai() {
-        let err = handle_auth_command(AuthAction::Login {
-            provider: "anthropic".to_string(),
-        })
-        .expect_err("native login should be limited to openai");
-        assert!(err
-            .to_string()
-            .contains("currently only supported for 'openai'"));
-    }
-
-    #[test]
-    fn auth_logout_only_supports_openai() {
-        let err = handle_auth_command(AuthAction::Logout {
-            provider: "anthropic".to_string(),
-        })
-        .expect_err("native logout should be limited to openai");
-        assert!(err
-            .to_string()
-            .contains("currently only supported for 'openai'"));
     }
 }
 
@@ -754,5 +702,53 @@ fn prompt_continue_or_exit(reason: &str) -> Result<bool> {
         }
 
         println!("Please enter 'c' to continue or 'e' to exit.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_auth_command;
+    use crate::cli::AuthAction;
+
+    #[test]
+    fn auth_add_openai_is_deprecated() {
+        let err = handle_auth_command(AuthAction::Add {
+            provider: "openai".to_string(),
+        })
+        .expect_err("openai add should be rejected");
+        assert!(err.to_string().contains("Run `rosie auth login openai`"));
+    }
+
+    #[test]
+    fn auth_remove_openai_is_deprecated() {
+        let err = handle_auth_command(AuthAction::Remove {
+            provider: "openai".to_string(),
+        })
+        .expect_err("openai remove should be rejected");
+        assert!(err.to_string().contains("Run `rosie auth login openai`"));
+    }
+
+    #[test]
+    fn auth_login_only_supports_openai() {
+        let err = handle_auth_command(AuthAction::Login {
+            provider: "anthropic".to_string(),
+        })
+        .expect_err("native login should be limited to openai");
+        assert!(
+            err.to_string()
+                .contains("currently only supported for 'openai'")
+        );
+    }
+
+    #[test]
+    fn auth_logout_only_supports_openai() {
+        let err = handle_auth_command(AuthAction::Logout {
+            provider: "anthropic".to_string(),
+        })
+        .expect_err("native logout should be limited to openai");
+        assert!(
+            err.to_string()
+                .contains("currently only supported for 'openai'")
+        );
     }
 }

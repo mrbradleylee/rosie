@@ -97,7 +97,7 @@ pub fn native_openai_model_presets() -> Vec<String> {
 }
 
 fn openai_login_status_for_path(cli_path: &str) -> NativeAuthStatus {
-    let output = Command::new(&cli_path)
+    let output = Command::new(cli_path)
         .args(["login", "status"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -639,9 +639,7 @@ exit 1
             .await
             .expect_err("logged out provider should fail");
 
-        assert!(err
-            .to_string()
-            .contains("Run `rosie auth login openai`"));
+        assert!(err.to_string().contains("Run `rosie auth login openai`"));
         let _ = fs::remove_file(script);
     }
 
@@ -652,7 +650,8 @@ exit 1
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let pid_file = env::temp_dir().join(format!("rosie-openai-pid-{}-{nanos}", std::process::id()));
+        let pid_file =
+            env::temp_dir().join(format!("rosie-openai-pid-{}-{nanos}", std::process::id()));
         let script = write_fake_cli(&format!(
             r#"#!/bin/sh
 if [ "$1" = "login" ] && [ "$2" = "status" ]; then
