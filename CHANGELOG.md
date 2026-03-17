@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0
+
 ### Changed
 
 - Reinterpreted `type = "openai"` as native ChatGPT-backed auth/runtime via the local OpenAI CLI, including new `rosie auth login|logout openai` commands
